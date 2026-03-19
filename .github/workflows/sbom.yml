@@ -1,0 +1,65 @@
+name: Generate SBOM
+
+on:
+  registry_package:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.2.1)"
+        required: true
+
+permissions:
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: eclipse-csi
+  NAME: pia
+  VERSION: "${{ inputs.version || github.event.registry_package.package_version.container_metadata.tag.name }}"
+  PIA_DOMAIN: pia-staging.eclipse.org
+
+jobs:
+  sbom-docker:
+    runs-on: ubuntu-latest
+    steps:
+    # TODO: See what's in it, most notably
+    # - github.event.registry_package.package_version.container_metadata.tag.name
+    # - registry_package.package_version.tag_name
+    # If there are multiple tags in the event, we need to pick one
+    # If there are redundant events for multiple tags, we need to filter events
+    - name: Debug registry_package event
+      if: github.event_name == 'registry_package'
+      run: echo '${{ toJSON(github.event.registry_package) }}' | jq .
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@28d71544de8eaf1b958d335707167c5f783590ad # v0.22.2
+      with:
+        image: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.NAME }}:${{ env.VERSION }}
+        output-file: sbom.json
+        format: cyclonedx-json
+        upload-artifact: false
+
+    - name: Upload SBOM
+      run: |
+        echo "Upload SBOM for ${{ env.NAME }} ${{ env.VERSION }}"
+
+        # Get OIDC token from GitHub Identity Provider
+        ID_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ env.PIA_DOMAIN }}" | jq -r '.value')
+
+        # Pretty-print token payload for debugging
+        echo "$ID_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq .
+
+        # Build JSON payload and upload to PIA
+        # Use jq --arg for proper JSON escaping of untrusted inputs,
+        # and --rawfile to read the large base64 bom from a file
+        # (passing it as --arg would exceed the argument list limit).
+        base64 -w0 sbom.json > bom.b64
+        jq -n --arg name "${{ env.NAME }}" \
+              --arg version "${{ env.VERSION }}" \
+              --rawfile bom bom.b64 \
+              '{product_name: $name, product_version: $version, bom: $bom}' | \
+        curl -sS --fail-with-body https://${{ env.PIA_DOMAIN }}/v1/upload/sbom \
+          -H "Authorization: Bearer ${ID_TOKEN}" \
+          --json @-
