@@ -6,11 +6,11 @@ from typing import Annotated, NoReturn
 
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from . import __version__, dependencytrack, oidc
 from .config import Settings
-from .db import get_session, make_engine, make_session_factory
 from .models import (
     DependencyTrackUploadPayload,
     PiaUploadPayload,
@@ -36,11 +36,13 @@ logger.info("PIA application settings loaded successfully")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database engine and session factory on app startup."""
-    app.state.engine = make_engine(settings)
-    app.state.session_factory = make_session_factory(app.state.engine)
+    engine = create_engine(settings.database_url)
+    app.state.session_factory = sessionmaker(
+        bind=engine, autoflush=False, expire_on_commit=False
+    )
     logger.info("Database engine and session factory initialized")
     yield
-    app.state.engine.dispose()
+    engine.dispose()
 
 
 # Create app
@@ -55,7 +57,11 @@ logger.info("PIA application initialized successfully")
 
 def session_dep(request: Request):
     """FastAPI dependency yielding a database session."""
-    yield from get_session(request.app.state.session_factory)
+    session = request.app.state.session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def _401(msg: str) -> NoReturn:

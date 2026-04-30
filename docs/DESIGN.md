@@ -302,8 +302,8 @@ Foundation project id.
   - Application settings management
   - Upload SBOM API endpoint implementing full authentication and
     DependencyTrack upload flow (section 3.1, items 4. through 6.)
-- `db.py`: SQLAlchemy engine, session factory, and declarative Base
 - `models.py`: Data models:
+  - SQLAlchemy declarative `Base`
   - SQLAlchemy ORM models: `EclipseFoundationProject`, `Workload`,
     `GitHubWorkload`, `JenkinsWorkload`, `DependencyTrackProject`
     (see section 4.3)

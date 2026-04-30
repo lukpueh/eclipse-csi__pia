@@ -5,8 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from pia.db import Base
 from pia.models import (
+    Base,
     DependencyTrackProject,
     EclipseFoundationProject,
     GitHubWorkload,

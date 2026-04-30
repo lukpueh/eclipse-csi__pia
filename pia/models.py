@@ -5,9 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import ForeignKey, String, select
-from sqlalchemy.orm import Mapped, Session, mapped_column
-
-from .db import Base
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +15,10 @@ GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 
 JENKINS_ISSUER_PREFIX = "https://ci.eclipse.org"
 """Prefix used for early validation of Jenkins issuer URLs."""
+
+
+class Base(DeclarativeBase):
+    """Declarative base class for ORM models."""
 
 
 class EclipseFoundationProject(Base):
