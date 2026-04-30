@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import ForeignKey, String, select
+from sqlalchemy import ForeignKey, String, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,10 @@ class GitHubWorkload(Workload):
     repo_owner: Mapped[str] = mapped_column(String)
     repo_owner_id: Mapped[str] = mapped_column(String)
 
+    __table_args__ = (
+        UniqueConstraint("repo_name", "repo_owner", "repo_owner_id"),
+    )
+
     __mapper_args__ = {
         "polymorphic_identity": "github",
     }
@@ -76,7 +80,7 @@ class JenkinsWorkload(Workload):
     __tablename__ = "jenkins_workloads"
 
     id: Mapped[int] = mapped_column(ForeignKey("workloads.id"), primary_key=True)
-    issuer: Mapped[str] = mapped_column(String)
+    issuer: Mapped[str] = mapped_column(String, unique=True)
 
     __mapper_args__ = {
         "polymorphic_identity": "jenkins",
