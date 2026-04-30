@@ -1,110 +1,163 @@
-"""Data models with validation and authentication logic."""
+"""ORM models for projects/workloads/products and Pydantic request models."""
 
 import logging
-from typing import Annotated, Any
+from typing import Any
 
-import yaml
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, RootModel, UrlConstraints
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import ForeignKey, String, select
+from sqlalchemy.orm import Mapped, Session, mapped_column
+
+from .db import Base
 
 logger = logging.getLogger(__name__)
 
-# `preserve_empty_path=True` tells pydantic to not add any trailing slashes,
-# to avoid surprising results in `Project.match_issuer`.
-HttpsUrl = Annotated[
-    HttpUrl, UrlConstraints(allowed_schemes=["https"], preserve_empty_path=True)
-]
+
+GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
+"""OIDC issuer for GitHub Actions tokens. Constant across all GitHub workloads."""
+
+JENKINS_ISSUER_PREFIX = "https://ci.eclipse.org"
+"""Prefix used for early validation of Jenkins issuer URLs."""
 
 
-class Project(BaseModel):
-    """Eclipse Foundation Project model."""
-
-    project_id: str
-    """
-    Eclipse Foundation project ID
-    https://www.eclipse.org/projects/handbook/#resources-identifiers
-    """
-
-    issuer: HttpsUrl
-    """
-    Allowed OIDC issuer for this project
-    """
-
-    dt_parent_uuid: str
-    """
-    DependencyTrack project UUID for SBOMs of this project
-    """
-
-    required_claims: dict[str, str] = Field(default_factory=dict)
-    """
-    Map of OIDC claim names and values required in OIDC tokens for this project
-    """
-
-    model_config = ConfigDict(use_attribute_docstrings=True)
-
-    def match_issuer(self, issuer: str) -> bool:
-        """Verify that issuer matches allowed project issuer."""
-        return issuer == str(self.issuer)
-
-    def match_claims(self, token_claims: dict[str, Any]) -> bool:
-        """Verify that token claims match required claims for project."""
-        for claim_name, expected_value in self.required_claims.items():
-            if token_claims.get(claim_name) != expected_value:
-                return False
-
-        return True
-
-
-class Projects(RootModel):
-    """List of Eclipse Foundation projects.
+class EclipseFoundationProject(Base):
+    """Eclipse Foundation project. Groups workloads and DependencyTrack projects.
 
     https://www.eclipse.org/projects/handbook/#resources-identifiers
     """
 
-    root: list[Project]
+    __tablename__ = "eclipse_foundation_projects"
 
-    def has_issuer(self, issuer: str) -> bool:
-        """Check if any project has the given issuer."""
-        found = any(project.match_issuer(issuer) for project in self.root)
-        return found
+    id: Mapped[str] = mapped_column(String, primary_key=True)
 
-    def find_project_by_claims(self, token_claims: dict[str, Any]) -> Project | None:
-        """Find project by matching verified token claims.
 
-        Returns Project if found, None otherwise.
-        A project matches if issuer matches AND all required_claims match.
-        """
-        issuer = token_claims["iss"]
-        logger.info(
-            f"Searching for project matching issuer '{issuer}' and token claims"
-        )
-        for project in self.root:
-            if not project.match_issuer(issuer):
-                logger.info(
-                    f"Project '{project.project_id}': issuer mismatch, skipping"
-                )
-                continue
-            if not project.match_claims(token_claims):
-                logger.info(
-                    f"Project '{project.project_id}': issuer matches"
-                    " but claims mismatch, skipping"
-                )
-                continue
+class Workload(Base):
+    """CI/CD entity authorized to upload SBOMs.
+
+    Polymorphic base — see GitHubWorkload and JenkinsWorkload.
+    """
+
+    __tablename__ = "workloads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ef_project_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "eclipse_foundation_projects.id",
+            onupdate="CASCADE",
+        ),
+    )
+    type: Mapped[str] = mapped_column(String)
+
+    __mapper_args__ = {
+        "polymorphic_identity": "workload",
+        "polymorphic_on": "type",
+    }
+
+
+class GitHubWorkload(Workload):
+    """GitHub Actions workload. Issuer is always GITHUB_ISSUER."""
+
+    __tablename__ = "github_workloads"
+
+    id: Mapped[int] = mapped_column(ForeignKey("workloads.id"), primary_key=True)
+    repo_name: Mapped[str] = mapped_column(String)
+    repo_owner: Mapped[str] = mapped_column(String)
+    repo_owner_id: Mapped[str] = mapped_column(String)
+
+    __mapper_args__ = {
+        "polymorphic_identity": "github",
+    }
+
+
+class JenkinsWorkload(Workload):
+    """Jenkins workload. Each instance has a distinct issuer URL."""
+
+    __tablename__ = "jenkins_workloads"
+
+    id: Mapped[int] = mapped_column(ForeignKey("workloads.id"), primary_key=True)
+    issuer: Mapped[str] = mapped_column(String)
+
+    __mapper_args__ = {
+        "polymorphic_identity": "jenkins",
+    }
+
+
+class DependencyTrackProject(Base):
+    """DependencyTrack target for SBOM uploads."""
+
+    __tablename__ = "dependency_track_projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ef_project_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "eclipse_foundation_projects.id",
+            onupdate="CASCADE",
+        ),
+    )
+    name: Mapped[str] = mapped_column(String)
+    parent_uuid: Mapped[str] = mapped_column(String)
+
+
+def is_issuer_known(session: Session, issuer: str) -> bool:
+    """Check if issuer is plausibly known to PIA.
+
+    GitHub: issuer must equal GITHUB_ISSUER, and at least one GitHub workload
+    must be registered.
+    Jenkins: issuer must start with JENKINS_ISSUER_PREFIX, and a Jenkins
+    workload with this exact issuer must be registered.
+    """
+    if issuer == GITHUB_ISSUER:
+        stmt = select(GitHubWorkload.id).limit(1)
+        return session.execute(stmt).first() is not None
+
+    if issuer.startswith(JENKINS_ISSUER_PREFIX):
+        stmt = select(JenkinsWorkload.id).where(JenkinsWorkload.issuer == issuer)
+        return session.execute(stmt).first() is not None
+
+    return False
+
+
+def find_workload_by_claims(
+    session: Session, token_claims: dict[str, Any]
+) -> Workload | None:
+    """Find Workload matching verified token claims.
+
+    GitHub: match by repo_owner, repo_name, repo_owner_id.
+    Jenkins: match by exact issuer.
+    Returns None if no match.
+    """
+    issuer = token_claims["iss"]
+    logger.info(f"Searching for workload matching issuer '{issuer}' and token claims")
+
+    if issuer == GITHUB_ISSUER:
+        repository = token_claims.get("repository", "")
+        if "/" not in repository:
             logger.info(
-                f"Project '{project.project_id}': issuer and claims match, "
-                f"claims are: {project.required_claims}"
+                "GitHub token missing or malformed 'repository' claim: "
+                f"{repository!r}"
             )
-            return project
-        return None
+            return None
+        repo_owner, repo_name = repository.split("/", 1)
+        repo_owner_id = token_claims.get("repository_owner_id")
+        gh_stmt = select(GitHubWorkload).where(
+            GitHubWorkload.repo_owner == repo_owner,
+            GitHubWorkload.repo_name == repo_name,
+            GitHubWorkload.repo_owner_id == repo_owner_id,
+        )
+        return session.execute(gh_stmt).scalar_one_or_none()
 
-    @classmethod
-    def from_yaml_file(cls, path: str) -> "Projects":
-        """Load Projects from YAML file."""
-        with open(path) as f:
-            config = yaml.safe_load(f)
+    jk_stmt = select(JenkinsWorkload).where(JenkinsWorkload.issuer == issuer)
+    return session.execute(jk_stmt).scalar_one_or_none()
 
-        projects = cls.model_validate(config)
-        logger.info(f"Loaded {len(projects.root)} project(s) from {path}")
-        return projects
+
+def find_dt_project(
+    session: Session, ef_project_id: str, name: str
+) -> DependencyTrackProject | None:
+    """Find DependencyTrackProject by name within an Eclipse Foundation project."""
+    stmt = select(DependencyTrackProject).where(
+        DependencyTrackProject.ef_project_id == ef_project_id,
+        DependencyTrackProject.name == name,
+    )
+    return session.execute(stmt).scalar_one_or_none()
 
 
 class PiaUploadPayload(BaseModel):

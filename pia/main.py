@@ -6,14 +6,18 @@ from typing import Annotated, NoReturn
 
 import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from sqlalchemy.orm import Session
 
 from . import __version__, dependencytrack, oidc
 from .config import Settings
+from .db import get_session, make_engine, make_session_factory
 from .models import (
     DependencyTrackUploadPayload,
     PiaUploadPayload,
-    Project,
-    Projects,
+    Workload,
+    find_dt_project,
+    find_workload_by_claims,
+    is_issuer_known,
 )
 
 # Configure logging
@@ -29,12 +33,14 @@ settings = Settings()
 logger.info("PIA application settings loaded successfully")
 
 
-# Lifespan wrapper to load projects from file only once on app startup
-# see https://fastapi.tiangolo.com/advanced/events/
 @asynccontextmanager
-async def load_project_settings_on_startup(app: FastAPI):
-    app.state.projects = Projects.from_yaml_file(settings.projects_path)
+async def lifespan(app: FastAPI):
+    """Initialize database engine and session factory on app startup."""
+    app.state.engine = make_engine(settings)
+    app.state.session_factory = make_session_factory(app.state.engine)
+    logger.info("Database engine and session factory initialized")
     yield
+    app.state.engine.dispose()
 
 
 # Create app
@@ -42,9 +48,14 @@ app = FastAPI(
     title="Project Identity Authority (PIA)",
     description="OIDC-based authentication broker for Eclipse Foundation projects",
     version=__version__,
-    lifespan=load_project_settings_on_startup,
+    lifespan=lifespan,
 )
 logger.info("PIA application initialized successfully")
+
+
+def session_dep(request: Request):
+    """FastAPI dependency yielding a database session."""
+    yield from get_session(request.app.state.session_factory)
 
 
 def _401(msg: str) -> NoReturn:
@@ -55,16 +66,11 @@ def _401(msg: str) -> NoReturn:
     )
 
 
-def get_projects(request: Request) -> Projects:
-    """Dependency providing the loaded Projects from app state."""
-    return request.app.state.projects
-
-
 async def authenticate(
     authorization: Annotated[str, Header()],
-    projects: Annotated[Projects, Depends(get_projects)],
-) -> Project:
-    """Authenticate request via OIDC Bearer token.
+    session: Annotated[Session, Depends(session_dep)],
+) -> Workload:
+    """Authenticate request via OIDC Bearer token, return matched Workload.
 
     Implements authentication flow from DESIGN.md section 3.1.1.
     Token must be provided as Bearer token in Authorization header (RFC6750).
@@ -74,7 +80,7 @@ async def authenticate(
     # Extract Bearer token from Authorization header
     if not authorization.startswith("Bearer "):
         _401("Invalid Authorization header format")
-    token = authorization[7:]  # Remove "Bearer " prefix
+    token = authorization[7:]
 
     logger.info("Bearer token extracted from Authorization header")
 
@@ -91,23 +97,15 @@ async def authenticate(
 
     logger.info(f"Unverified issuer extracted: {unverified_issuer}")
 
-    # Check if issuer exists in any project configuration to fail early
-    #
-    # NOTE: This is an expensive operation (iterates over all projects) for a
-    # completely unauthenticated request. Consider to ...
-    # - make less expensive (optimize with db), or
-    # - match against issuer constants (full for GitHub, prefix-only for Jenkins)
-    logger.info(
-        f"Checking if issuer '{unverified_issuer}' is allowed "
-        f"across {len(projects.root)} project(s)"
-    )
-    if not projects.has_issuer(unverified_issuer):
+    # Early validation: is the issuer plausibly known?
+    if not is_issuer_known(session, unverified_issuer):
         logger.warning(f"Issuer {unverified_issuer} not allowed")
         _401("Issuer not allowed")
 
     logger.info(
         f"Issuer '{unverified_issuer}' is allowed, proceeding with token verification"
     )
+
     # Full token verification
     try:
         verified_claims = oidc.verify_token(
@@ -121,19 +119,20 @@ async def authenticate(
 
     logger.info("Token signature verified successfully")
 
-    # Find project by matching verified token claims
-    # NOTE: Returns first match
-    project = projects.find_project_by_claims(verified_claims)
-    if not project:
-        logger.warning(f"No matching project found for token claims: {verified_claims}")
-        _401("No matching project found for token claims")
+    # Find workload by matching verified claims
+    workload = find_workload_by_claims(session, verified_claims)
+    if not workload:
+        logger.warning(
+            f"No matching workload found for token claims: {verified_claims}"
+        )
+        _401("No matching workload found for token claims")
 
     logger.info(
-        f"Successfully authenticated project {project.project_id} "
-        f"with issuer {verified_claims['iss']}"
+        f"Authenticated workload (project={workload.ef_project_id}, "
+        f"type={workload.type}, id={workload.id})"
     )
 
-    return project
+    return workload
 
 
 @app.get("/livez")
@@ -145,19 +144,31 @@ async def livez():
 @app.post("/v1/upload/sbom", status_code=status.HTTP_200_OK)
 async def upload_sbom(
     payload: PiaUploadPayload,
-    project: Annotated[Project, Depends(authenticate)],
+    workload: Annotated[Workload, Depends(authenticate)],
+    session: Annotated[Session, Depends(session_dep)],
 ):
     """Handle SBOM upload."""
+    # Resolve DependencyTrack project (must share workload's ef_project_id)
+    dt_project = find_dt_project(
+        session, workload.ef_project_id, payload.product_name
+    )
+    if not dt_project:
+        logger.warning(
+            f"No DependencyTrack project '{payload.product_name}' found for "
+            f"ef_project_id '{workload.ef_project_id}'"
+        )
+        _401("No matching DependencyTrack project found")
+
     logger.info(
-        f"Preparing DependencyTrack payload for {payload.product_name} "
-        f"{payload.product_version}"
+        f"Resolved DependencyTrack project '{dt_project.name}' "
+        f"(parent_uuid={dt_project.parent_uuid})"
     )
 
-    # Create DependencyTrack payload
+    # Build DependencyTrack payload
     dt_payload = DependencyTrackUploadPayload(
         project_name=payload.product_name,
         project_version=payload.product_version,
-        parent_uuid=project.dt_parent_uuid,
+        parent_uuid=dt_project.parent_uuid,
         is_latest=payload.is_latest,
         bom=payload.bom,
     )
@@ -169,15 +180,11 @@ async def upload_sbom(
             settings.dependency_track_api_key,
             dt_payload,
         )
-
-        # Relay DependencyTrack response
-        response = Response(
+        return Response(
             content=dt_response.content,
             status_code=dt_response.status_code,
             media_type="application/json",
         )
-        return response
-
     except dependencytrack.DependencyTrackError as e:
         logger.error(f"DependencyTrack upload failed: {e}")
         raise HTTPException(
