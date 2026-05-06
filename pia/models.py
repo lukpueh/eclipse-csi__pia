@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import ForeignKey, String, UniqueConstraint, select
+from sqlalchemy import ForeignKey, Select, String, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ def find_workload_by_claims(
     issuer = token_claims["iss"]
     logger.info(f"Searching for workload matching issuer '{issuer}' and token claims")
 
+    stmt: Select[Any]
     if issuer == GITHUB_ISSUER:
         repository = token_claims.get("repository", "")
         if "/" not in repository:
@@ -144,15 +145,14 @@ def find_workload_by_claims(
             return None
         repo_owner, repo_name = repository.split("/", 1)
         repo_owner_id = token_claims.get("repository_owner_id")
-        gh_stmt = select(GitHubWorkload).where(
+        stmt = select(GitHubWorkload).where(
             GitHubWorkload.repo_owner == repo_owner,
             GitHubWorkload.repo_name == repo_name,
             GitHubWorkload.repo_owner_id == repo_owner_id,
         )
-        return session.execute(gh_stmt).scalar_one_or_none()
-
-    jk_stmt = select(JenkinsWorkload).where(JenkinsWorkload.issuer == issuer)
-    return session.execute(jk_stmt).scalar_one_or_none()
+    else:
+        stmt = select(JenkinsWorkload).where(JenkinsWorkload.issuer == issuer)
+    return session.execute(stmt).scalar_one_or_none()
 
 
 def find_dt_project(
