@@ -37,11 +37,10 @@ logger.info("PIA application settings loaded successfully")
 async def lifespan(app: FastAPI):
     """Initialize database engine and session factory on app startup."""
     engine = create_engine(settings.database_url)
-    app.state.session_factory = sessionmaker(
-        bind=engine, autoflush=False, expire_on_commit=False
-    )
+    app.state.session_factory = sessionmaker(bind=engine)
     logger.info("Database engine and session factory initialized")
     yield
+    # Release pooled connections at shutdown.
     engine.dispose()
 
 
@@ -55,8 +54,11 @@ app = FastAPI(
 logger.info("PIA application initialized successfully")
 
 
-def session_dep(request: Request):
-    """FastAPI dependency yielding a database session."""
+def get_session(request: Request):
+    """FastAPI dependency yielding a database session.
+
+    A new Session is created per request and closed when the request finishes.
+    """
     session = request.app.state.session_factory()
     try:
         yield session
@@ -74,7 +76,7 @@ def _401(msg: str) -> NoReturn:
 
 async def authenticate(
     authorization: Annotated[str, Header()],
-    session: Annotated[Session, Depends(session_dep)],
+    session: Annotated[Session, Depends(get_session)],
 ) -> Workload:
     """Authenticate request via OIDC Bearer token, return matched Workload.
 
@@ -151,13 +153,11 @@ async def livez():
 async def upload_sbom(
     payload: PiaUploadPayload,
     workload: Annotated[Workload, Depends(authenticate)],
-    session: Annotated[Session, Depends(session_dep)],
+    session: Annotated[Session, Depends(get_session)],
 ):
     """Handle SBOM upload."""
     # Resolve DependencyTrack project (must share workload's ef_project_id)
-    dt_project = find_dt_project(
-        session, workload.ef_project_id, payload.product_name
-    )
+    dt_project = find_dt_project(session, workload.ef_project_id, payload.product_name)
     if not dt_project:
         logger.warning(
             f"No DependencyTrack project '{payload.product_name}' found for "

@@ -29,7 +29,7 @@ def engine():
 
 @pytest.fixture
 def session_factory(engine):
-    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    return sessionmaker(bind=engine)
 
 
 @pytest.fixture

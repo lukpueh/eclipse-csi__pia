@@ -28,16 +28,16 @@ def setup_env(monkeypatch):
 @pytest.fixture
 def client(setup_env, seed_db, session_factory):
     """FastAPI test client with overridden DB session."""
-    from pia.main import app, session_dep
+    from pia.main import app, get_session
 
-    def override_session_dep():
+    def override_get_session():
         session = session_factory()
         try:
             yield session
         finally:
             session.close()
 
-    app.dependency_overrides[session_dep] = override_session_dep
+    app.dependency_overrides[get_session] = override_get_session
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

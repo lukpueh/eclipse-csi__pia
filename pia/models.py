@@ -18,7 +18,7 @@ JENKINS_ISSUER_PREFIX = "https://ci.eclipse.org"
 
 
 class Base(DeclarativeBase):
-    """Declarative base class for ORM models."""
+    """Declarative base class for al ORM models."""
 
 
 class EclipseFoundationProject(Base):
@@ -29,28 +29,42 @@ class EclipseFoundationProject(Base):
 
     __tablename__ = "eclipse_foundation_projects"
 
+    # `Mapped[str]` is the type annotation SQLAlchemy reads to infer the column
+    # type and nullability; `mapped_column(...)` provides runtime column options.
+    # Here the PK is the Eclipse project identifier itself.
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
 
 class Workload(Base):
     """CI/CD entity authorized to upload SBOMs.
 
-    Polymorphic base — see GitHubWorkload and JenkinsWorkload.
+    Polymorphic base — see GitHubWorkload and JenkinsWorkload. Uses joined-
+    table inheritance: each subclass gets its own table sharing the `id` PK
+    with this base table. SQLAlchemy uses the `type` discriminator column to
+    instantiate the right subclass when loading rows.
     """
 
     __tablename__ = "workloads"
 
+    # Autoincrementing integer PK.
     id: Mapped[int] = mapped_column(primary_key=True)
+    # `onupdate="CASCADE"` propagates ef_project_id changes from the parent
+    # eclipse_foundation_projects row to all referencing rows.
     ef_project_id: Mapped[str] = mapped_column(
         ForeignKey(
             "eclipse_foundation_projects.id",
             onupdate="CASCADE",
         ),
     )
+    # Discriminator column. Values come from subclass's
+    # `__mapper_args__["polymorphic_identity"]`.
     type: Mapped[str] = mapped_column(String)
 
     __mapper_args__ = {
+        # Identity to write into `type` if a Workload is instantiated directly
+        # (we don't expect that, but SQLAlchemy requires a value).
         "polymorphic_identity": "workload",
+        # Tell the mapper to dispatch on `type` when loading rows.
         "polymorphic_on": "type",
     }
 
@@ -65,9 +79,8 @@ class GitHubWorkload(Workload):
     repo_owner: Mapped[str] = mapped_column(String)
     repo_owner_id: Mapped[str] = mapped_column(String)
 
-    __table_args__ = (
-        UniqueConstraint("repo_name", "repo_owner", "repo_owner_id"),
-    )
+    # Multi-column uniqueness constraint
+    __table_args__ = (UniqueConstraint("repo_name", "repo_owner", "repo_owner_id"),)
 
     __mapper_args__ = {
         "polymorphic_identity": "github",
@@ -80,6 +93,7 @@ class JenkinsWorkload(Workload):
     __tablename__ = "jenkins_workloads"
 
     id: Mapped[int] = mapped_column(ForeignKey("workloads.id"), primary_key=True)
+    # Single-column uniqueness constraint
     issuer: Mapped[str] = mapped_column(String, unique=True)
 
     __mapper_args__ = {
@@ -139,8 +153,7 @@ def find_workload_by_claims(
         repository = token_claims.get("repository", "")
         if "/" not in repository:
             logger.info(
-                "GitHub token missing or malformed 'repository' claim: "
-                f"{repository!r}"
+                f"GitHub token missing or malformed 'repository' claim: {repository!r}"
             )
             return None
         repo_owner, repo_name = repository.split("/", 1)
