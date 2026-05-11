@@ -63,13 +63,13 @@ def _fetch_github_owner_id(owner: str) -> str:
     return owner_id
 
 
-def _dt_find_project_by_name(dt_url: str, name: str, api_key: str) -> dict:
-    """Look up a DependencyTrack project by name, asserting exactly one match."""
+def _dt_find_root_project_by_name(dt_url: str, name: str, api_key: str) -> dict:
+    """Look up a root DependencyTrack project by name, asserting exactly one match."""
     url = f"{dt_url.rstrip('/')}/api/v1/project"
-    logger.info(f"Querying DependencyTrack project list at {url} for name={name!r}")
+    logger.info(f"Querying DependencyTrack root projects at {url} for name={name!r}")
     response = requests.get(
         url,
-        params={"name": name},
+        params={"name": name, "onlyRoot": "true"},
         headers={"X-Api-Key": api_key, "Accept": "application/json"},
     )
     response.raise_for_status()
@@ -77,7 +77,7 @@ def _dt_find_project_by_name(dt_url: str, name: str, api_key: str) -> dict:
     matches = [p for p in projects if p.get("name") == name]
     if len(matches) != 1:
         raise click.ClickException(
-            f"Expected exactly one DependencyTrack project named {name!r}, "
+            f"Expected exactly one root DependencyTrack project named {name!r}, "
             f"found {len(matches)}"
         )
     return matches[0]
@@ -153,24 +153,22 @@ def add_dt_project(
 ) -> None:
     """Register a DependencyTrack project for an Eclipse Foundation project.
 
-    Looks up parent and child by name on DependencyTrack (asserting exactly one
-    match each), verifies the child's parent UUID matches, then stores the
-    child UUID as parent_uuid.
+    Fetches the root project matching PARENT_NAME (asserting exactly one), then
+    finds PROJECT_NAME among its children (asserting exactly one), and stores
+    that child's UUID.
     """
     api_key = _dt_api_key()
 
-    parent = _dt_find_project_by_name(dt_url, parent_name, api_key)
-    parent_uuid_remote = parent["uuid"]
-    logger.info(f"Resolved parent {parent_name!r} -> uuid={parent_uuid_remote}")
+    parent = _dt_find_root_project_by_name(dt_url, parent_name, api_key)
+    logger.info(f"Resolved parent {parent_name!r} -> uuid={parent['uuid']}")
 
-    child = _dt_find_project_by_name(dt_url, project_name, api_key)
-    child_parent_uuid = (child.get("parent") or {}).get("uuid")
-    if child_parent_uuid != parent_uuid_remote:
+    children = [c for c in parent.get("children", []) if c.get("name") == project_name]
+    if len(children) != 1:
         raise click.ClickException(
-            f"DependencyTrack project {project_name!r} has parent UUID "
-            f"{child_parent_uuid!r}, expected {parent_uuid_remote!r}"
+            f"Expected exactly one child named {project_name!r} under {parent_name!r}, "
+            f"found {len(children)}"
         )
-    child_uuid = child["uuid"]
+    child_uuid = children[0]["uuid"]
     logger.info(f"Resolved child {project_name!r} -> uuid={child_uuid}")
 
     dt_project = DependencyTrackProject(
