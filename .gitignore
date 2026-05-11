@@ -42,3 +42,6 @@ htmlcov/
 # PIA specific
 projects.yaml  # Don't commit actual projects (use projects.yaml.example)
 *.log
+
+# Claude Code memory (synced from sandbox; see /home/agent/.claude/...)
+.claude-memory/
