@@ -15,14 +15,20 @@ from pia.models import (
     JenkinsWorkload,
 )
 from pia.sync import (
+    DT_PENDING_UUID,
     Desired,
     DesiredDt,
     DesiredGitHub,
     DesiredJenkins,
+    DtProjectSpec,
+    ProjectsFile,
+    ProjectSpec,
     apply_plan,
+    build_desired,
     classify_workload_url,
     compute_plan,
     load_projects_file,
+    resolve_dt_child_uuid,
     validate_projects_file,
 )
 
@@ -31,6 +37,15 @@ def _write(tmp_path, text: str) -> str:
     p = tmp_path / "projects.yaml"
     p.write_text(textwrap.dedent(text))
     return str(p)
+
+
+def _resp(json_data):
+    from unittest.mock import MagicMock
+
+    r = MagicMock()
+    r.json.return_value = json_data
+    r.raise_for_status.return_value = None
+    return r
 
 
 # --------------------------------------------------------------------------- #
@@ -283,7 +298,13 @@ def patch_cli(session_factory, monkeypatch):
     monkeypatch.setattr(
         sync_module,
         "resolve_dt_child_uuid",
-        lambda dt_url, parent, project, api_key, root_cache=None: "uuid-1",
+        lambda dt_url,
+        parent,
+        project,
+        api_key,
+        root_cache=None,
+        create=False,
+        dry_run=False: "uuid-1",
     )
 
 
@@ -394,3 +415,134 @@ def test_sync_deletions_require_yes(runner, tmp_path, session_factory, patch_cli
             s.query(EclipseFoundationProject).filter_by(id="eclipse-stale").count() == 0
         )
         assert s.query(GitHubWorkload).count() == 1
+
+
+# --------------------------------------------------------------------------- #
+# DependencyTrack project creation (--create-dt-projects)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_dt_missing_without_create_raises(monkeypatch):
+    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
+    with pytest.raises(click.ClickException, match="Expected exactly one root"):
+        resolve_dt_child_uuid("http://dt", "Root", "Child", "key", create=False)
+
+
+def test_resolve_dt_creates_missing_root_and_child(monkeypatch):
+    puts = []
+
+    def fake_get(*a, **k):
+        return _resp([])  # no root exists
+
+    def fake_put(url, json=None, **k):
+        puts.append((json["name"], json.get("parent")))
+        return _resp({"uuid": f"uuid-{json['name']}", "name": json["name"]})
+
+    monkeypatch.setattr(sync_module.requests, "get", fake_get)
+    monkeypatch.setattr(sync_module.requests, "put", fake_put)
+
+    uuid = resolve_dt_child_uuid("http://dt", "Root", "Child", "key", {}, create=True)
+
+    assert uuid == "uuid-Child"
+    # Root created first (no parent), then child under the new root.
+    assert puts[0] == ("Root", None)
+    assert puts[1] == ("Child", {"uuid": "uuid-Root"})
+
+
+def test_resolve_dt_creates_only_missing_child(monkeypatch):
+    puts = []
+    monkeypatch.setattr(
+        sync_module.requests,
+        "get",
+        lambda *a, **k: _resp([{"name": "Root", "uuid": "root-uuid", "children": []}]),
+    )
+
+    def fake_put(url, json=None, **k):
+        puts.append(json)
+        return _resp({"uuid": "child-uuid", "name": json["name"]})
+
+    monkeypatch.setattr(sync_module.requests, "put", fake_put)
+
+    uuid = resolve_dt_child_uuid("http://dt", "Root", "Child", "key", {}, create=True)
+
+    assert uuid == "child-uuid"
+    assert len(puts) == 1
+    assert puts[0]["parent"] == {"uuid": "root-uuid"}
+
+
+def test_resolve_dt_ambiguous_root_errors_even_with_create(monkeypatch):
+    monkeypatch.setattr(
+        sync_module.requests,
+        "get",
+        lambda *a, **k: _resp(
+            [
+                {"name": "Root", "uuid": "1", "children": []},
+                {"name": "Root", "uuid": "2", "children": []},
+            ]
+        ),
+    )
+    with pytest.raises(click.ClickException, match="Expected exactly one root"):
+        resolve_dt_child_uuid("http://dt", "Root", "Child", "key", create=True)
+
+
+def test_resolve_dt_dry_run_reports_pending_without_creating(monkeypatch):
+    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
+
+    def fail_put(*a, **k):
+        raise AssertionError("must not create projects under --dry-run")
+
+    monkeypatch.setattr(sync_module.requests, "put", fail_put)
+
+    uuid = resolve_dt_child_uuid(
+        "http://dt", "Root", "Child", "key", {}, create=True, dry_run=True
+    )
+    assert uuid == DT_PENDING_UUID
+
+
+def test_build_desired_creates_dt_projects(monkeypatch):
+    monkeypatch.setattr(
+        sync_module, "fetch_github_owner_id", lambda owner, token=None: "1"
+    )
+    puts = []
+    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
+
+    def fake_put(url, json=None, **k):
+        puts.append(json["name"])
+        return _resp({"uuid": f"uuid-{json['name']}", "name": json["name"]})
+
+    monkeypatch.setattr(sync_module.requests, "put", fake_put)
+
+    pf = ProjectsFile(
+        projects=[
+            ProjectSpec(
+                id="p",
+                dependency_track=[DtProjectSpec(parent="Root", project="Child")],
+            )
+        ]
+    )
+    desired = build_desired(pf, "http://dt", "key", create_dt_projects=True)
+
+    assert desired.dt[("p", "Child")].parent_uuid == "uuid-Child"
+    assert puts == ["Root", "Child"]
+
+
+def test_build_desired_dry_run_marks_dt_pending(monkeypatch):
+    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
+
+    def fail_put(*a, **k):
+        raise AssertionError("must not create projects under --dry-run")
+
+    monkeypatch.setattr(sync_module.requests, "put", fail_put)
+
+    pf = ProjectsFile(
+        projects=[
+            ProjectSpec(
+                id="p",
+                dependency_track=[DtProjectSpec(parent="Root", project="Child")],
+            )
+        ]
+    )
+    desired = build_desired(
+        pf, "http://dt", "key", create_dt_projects=True, dry_run=True
+    )
+    assert desired.dt[("p", "Child")].parent_uuid == DT_PENDING_UUID

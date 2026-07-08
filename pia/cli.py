@@ -220,7 +220,21 @@ def add_dt_project(
     is_flag=True,
     help="Apply the plan even when it contains deletions.",
 )
-def sync(file: str, dt_url: str | None, dry_run: bool, check: bool, yes: bool) -> None:
+@click.option(
+    "--create-dt-projects",
+    is_flag=True,
+    help="Create missing DependencyTrack parent/child projects instead of "
+    "failing when they do not exist (requires a DT API key with project "
+    "creation permission).",
+)
+def sync(
+    file: str,
+    dt_url: str | None,
+    dry_run: bool,
+    check: bool,
+    yes: bool,
+    create_dt_projects: bool,
+) -> None:
     """Reconcile all authorizations from a curated FILE into the database.
 
     Computes the difference between the file (the source of truth) and the
@@ -245,6 +259,8 @@ def sync(file: str, dt_url: str | None, dry_run: bool, check: bool, yes: bool) -
         dt_url=dt_url,
         dt_api_key=os.environ.get("PIA_DEPENDENCY_TRACK_API_KEY"),
         github_token=os.environ.get("PIA_GITHUB_TOKEN"),
+        create_dt_projects=create_dt_projects,
+        dry_run=dry_run,
     )
 
     with _make_session() as session:

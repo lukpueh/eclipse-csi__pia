@@ -82,6 +82,10 @@ PIA_DATABASE_URL=... PIA_DEPENDENCY_TRACK_API_KEY=... \
   uv run pia sync projects.yaml --dt-url https://sbom.eclipse.org --dry-run
 ```
 
+Pass `--create-dt-projects` to have sync create missing DependencyTrack
+parent/child projects instead of failing when they don't exist (requires a DT API
+key with project-creation permission).
+
 In production `pia sync` runs as an in-cluster Job; see the deployment repo.
 
 #### Trying the sync CLI locally

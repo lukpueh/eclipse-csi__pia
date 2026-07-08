@@ -393,7 +393,7 @@ environment variable. The API key requires at least the `VIEW_PORTFOLIO` permiss
 If the `EclipseFoundationProject` row for `ef_project_id` does not exist, it is
 created automatically.
 
-#### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--yes]`
+#### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--yes] [--create-dt-projects]`
 
 Reconciles the whole authorization state to match a curated file (the source of
 truth). The file lists Eclipse Foundation projects, each with a flat list of
@@ -416,9 +416,12 @@ DependencyTrack child UUIDs), diffs the desired state against the database, prin
 a plan, and applies it — **creating, updating and deleting** rows so the database
 matches the file. Flags: `--dry-run` prints the plan without writing; `--check`
 validates the file's shape only (no database or network); `--yes` is required to
-apply a plan that contains deletions. `--dt-url` is the DependencyTrack base URL
-(required only if the file has `dependency_track` entries). `PIA_GITHUB_TOKEN` is
-optional and only lifts the anonymous GitHub rate limit.
+apply a plan that contains deletions. `--create-dt-projects` creates missing
+DependencyTrack parent/child projects instead of failing when they do not exist
+(requires a DT API key with project-creation permission; under `--dry-run` the
+creations are only reported, not performed). `--dt-url` is the DependencyTrack
+base URL (required only if the file has `dependency_track` entries).
+`PIA_GITHUB_TOKEN` is optional and only lifts the anonymous GitHub rate limit.
 
 Note: a GitHub repo maps to a single workload; SBOMs from the same repo that were
 previously disambiguated by a `workflow` claim are not separable in the current

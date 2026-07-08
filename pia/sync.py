@@ -42,6 +42,10 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Placeholder UUID used in the plan for a DependencyTrack project that --dry-run
+# reports as "would be created" (with --create-dt-projects) but does not create.
+DT_PENDING_UUID = "(to-be-created)"
+
 
 # --------------------------------------------------------------------------- #
 # Curated-file model
@@ -161,10 +165,10 @@ def fetch_github_owner_id(owner: str, token: str | None = None) -> str:
     return owner_id
 
 
-def _dt_find_root_project_by_name(
+def _dt_search_root_projects(
     dt_url: str, name: str, api_key: str
-) -> dict[str, Any]:
-    """Look up a root DependencyTrack project by name, asserting exactly one match."""
+) -> list[dict[str, Any]]:
+    """Return all root DependencyTrack projects with the given name."""
     url = f"{dt_url.rstrip('/')}/api/v1/project"
     logger.info(f"Querying DependencyTrack root projects at {url} for name={name!r}")
     response = requests.get(
@@ -173,13 +177,29 @@ def _dt_find_root_project_by_name(
         headers={"X-Api-Key": api_key, "Accept": "application/json"},
     )
     response.raise_for_status()
-    projects = response.json()
-    if len(projects) != 1:
-        raise click.ClickException(
-            f"Expected exactly one root DependencyTrack project named {name!r}, "
-            f"found {len(projects)}"
-        )
-    return projects[0]
+    return response.json()
+
+
+def _dt_create_project(
+    dt_url: str, name: str, api_key: str, parent_uuid: str | None = None
+) -> dict[str, Any]:
+    """Create a DependencyTrack project (root if ``parent_uuid`` is None)."""
+    where = f"under parent {parent_uuid}" if parent_uuid else "(root)"
+    logger.info(f"Creating DependencyTrack project {name!r} {where}")
+    body: dict[str, Any] = {"name": name}
+    if parent_uuid:
+        body["parent"] = {"uuid": parent_uuid}
+    response = requests.put(
+        f"{dt_url.rstrip('/')}/api/v1/project",
+        json=body,
+        headers={
+            "X-Api-Key": api_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def resolve_dt_child_uuid(
@@ -188,26 +208,79 @@ def resolve_dt_child_uuid(
     project_name: str,
     api_key: str,
     root_cache: dict[str, dict[str, Any]] | None = None,
+    create: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """Resolve the UUID of child ``project_name`` under root ``parent_name``.
 
     ``root_cache`` (optional) memoises root-project lookups by name so a sync that
     reuses the same DT root across many mappings issues one request per root.
+
+    When ``create`` is set, a missing root or child project is created rather than
+    raising — except under ``dry_run``, where nothing is created and the pending
+    creation is logged and reported via the ``DT_PENDING_UUID`` sentinel. An
+    *ambiguous* match (more than one) is always an error, even with ``create``.
     """
-    if root_cache is not None and parent_name in root_cache:
-        parent = root_cache[parent_name]
-    else:
-        parent = _dt_find_root_project_by_name(dt_url, parent_name, api_key)
+    parent = root_cache.get(parent_name) if root_cache is not None else None
+    if parent is None:
+        roots = _dt_search_root_projects(dt_url, parent_name, api_key)
+        if len(roots) > 1:
+            raise click.ClickException(
+                f"Expected exactly one root DependencyTrack project named "
+                f"{parent_name!r}, found {len(roots)}"
+            )
+        if len(roots) == 1:
+            parent = roots[0]
+            parent.setdefault("children", [])
+        elif not create:
+            raise click.ClickException(
+                f"Expected exactly one root DependencyTrack project named "
+                f"{parent_name!r}, found 0"
+            )
+        elif dry_run:
+            logger.info(
+                f"[dry-run] would create DependencyTrack root project {parent_name!r}"
+            )
+            parent = {"uuid": None, "children": [], "_pending": True}
+        else:
+            parent = _dt_create_project(dt_url, parent_name, api_key)
+            parent.setdefault("children", [])
         if root_cache is not None:
             root_cache[parent_name] = parent
 
+    if parent.get("_pending"):
+        logger.info(
+            f"[dry-run] would create DependencyTrack project {project_name!r} "
+            f"under {parent_name!r}"
+        )
+        return DT_PENDING_UUID
+
     children = [c for c in parent.get("children", []) if c.get("name") == project_name]
-    if len(children) != 1:
+    if len(children) > 1:
         raise click.ClickException(
             f"Expected exactly one child named {project_name!r} under "
             f"{parent_name!r}, found {len(children)}"
         )
-    return children[0]["uuid"]
+    if len(children) == 1:
+        return children[0]["uuid"]
+    if not create:
+        raise click.ClickException(
+            f"Expected exactly one child named {project_name!r} under "
+            f"{parent_name!r}, found 0"
+        )
+    if dry_run:
+        logger.info(
+            f"[dry-run] would create DependencyTrack project {project_name!r} "
+            f"under {parent_name!r}"
+        )
+        return DT_PENDING_UUID
+
+    child = _dt_create_project(
+        dt_url, project_name, api_key, parent_uuid=parent["uuid"]
+    )
+    # Keep the cache consistent for other mappings that reuse this root.
+    parent["children"].append({"name": project_name, "uuid": child["uuid"]})
+    return child["uuid"]
 
 
 # --------------------------------------------------------------------------- #
@@ -254,11 +327,15 @@ def build_desired(
     dt_url: str | None,
     dt_api_key: str | None,
     github_token: str | None = None,
+    create_dt_projects: bool = False,
+    dry_run: bool = False,
 ) -> Desired:
     """Resolve the curated file into a fully-populated desired state.
 
     Performs the external lookups (GitHub owner ids, DependencyTrack child UUIDs).
     ``dt_url``/``dt_api_key`` are required only if any DependencyTrack mappings exist.
+    When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
+    are created (or, under ``dry_run``, reported as pending without being created).
     """
     desired = Desired()
     owner_id_cache: dict[str, str] = {}
@@ -292,7 +369,13 @@ def build_desired(
                     "PIA_DEPENDENCY_TRACK_API_KEY not provided"
                 )
             child_uuid = resolve_dt_child_uuid(
-                dt_url, dt.parent, dt.project, dt_api_key, dt_root_cache
+                dt_url,
+                dt.parent,
+                dt.project,
+                dt_api_key,
+                dt_root_cache,
+                create=create_dt_projects,
+                dry_run=dry_run,
             )
             desired.dt[(project.id, dt.project)] = DesiredDt(
                 ef_project_id=project.id,
@@ -427,7 +510,12 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
             plan.lines.append(f"+ {dt_label} -> {dd.parent_uuid}")
         else:
             dt_changes: dict[str, Any] = {}
-            if dt_row.parent_uuid != dd.parent_uuid:
+            # Ignore the dry-run "pending creation" sentinel: it is not a real
+            # UUID, so it must not be recorded as a parent_uuid change.
+            if (
+                dd.parent_uuid != DT_PENDING_UUID
+                and dt_row.parent_uuid != dd.parent_uuid
+            ):
                 dt_changes["parent_uuid"] = dd.parent_uuid
             if dt_changes:
                 plan.updates.append((dt_row, dt_changes))
