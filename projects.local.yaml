@@ -3,9 +3,9 @@
 # --create-dt-projects to have the referenced DependencyTrack projects created if
 # they don't exist yet.
 projects:
-  - id: eclipse-foo
+  - id: eclipse.csi
     workloads:
-      - https://github.com/eclipse-csi/otterdog
+      - https://github.com/eclipse-csi/pia
     dependency_track:
-      - parent: "Eclipse Foo"
-        project: foo-server
+      - parent: "Eclipse CSI"
+        project: pia
