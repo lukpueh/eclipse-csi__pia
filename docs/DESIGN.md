@@ -393,6 +393,38 @@ environment variable. The API key requires at least the `VIEW_PORTFOLIO` permiss
 If the `EclipseFoundationProject` row for `ef_project_id` does not exist, it is
 created automatically.
 
+#### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--yes]`
+
+Reconciles the whole authorization state to match a curated file (the source of
+truth). The file lists Eclipse Foundation projects, each with a flat list of
+workload URLs (GitHub repo or Jenkins issuer — classified by host as in
+`add-workload`) and a list of DependencyTrack `(parent, project)` mappings:
+
+```yaml
+projects:
+  - id: technology.foo
+    workloads:
+      - https://github.com/eclipse-foo/repo
+      - https://ci.eclipse.org/foo/oidc
+    dependency_track:
+      - parent: "Eclipse Foo"
+        project: foo-server
+```
+
+`sync` resolves the same external data as the `add-*` commands (GitHub owner ids,
+DependencyTrack child UUIDs), diffs the desired state against the database, prints
+a plan, and applies it — **creating, updating and deleting** rows so the database
+matches the file. Flags: `--dry-run` prints the plan without writing; `--check`
+validates the file's shape only (no database or network); `--yes` is required to
+apply a plan that contains deletions. `--dt-url` is the DependencyTrack base URL
+(required only if the file has `dependency_track` entries). `PIA_GITHUB_TOKEN` is
+optional and only lifts the anonymous GitHub rate limit.
+
+Note: a GitHub repo maps to a single workload; SBOMs from the same repo that were
+previously disambiguated by a `workflow` claim are not separable in the current
+model — list them as multiple `dependency_track` targets selected by
+`product_name` at upload instead.
+
 ## 6. Security Considerations
 
 ### 6.1 Token Validation

@@ -65,3 +65,21 @@ version control.
 ```shell
 docker compose run --rm pia alembic revision --autogenerate --message "MESSAGE"
 ```
+
+### Managing Authorizations
+
+Project authorizations (workloads and DependencyTrack targets) live in the
+database. Register them one at a time with `pia add-workload` / `pia add-dt-project`,
+or reconcile the whole set declaratively from a curated file with `pia sync`
+(see the [CLI section of the design doc](docs/DESIGN.md#55-cli-tool)):
+
+```shell
+# Validate a curated file's shape (no database or network access)
+uv run pia sync projects.yaml --check
+
+# Preview the reconcile plan against the database
+PIA_DATABASE_URL=... PIA_DEPENDENCY_TRACK_API_KEY=... \
+  uv run pia sync projects.yaml --dt-url https://sbom.eclipse.org --dry-run
+```
+
+In production `pia sync` runs as an in-cluster Job; see the deployment repo.

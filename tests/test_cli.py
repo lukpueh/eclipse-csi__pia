@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from pia import cli as cli_module
+from pia import sync as sync_module
 from pia.models import (
     DependencyTrackProject,
     EclipseFoundationProject,
@@ -44,7 +45,7 @@ def dt_api_key(monkeypatch):
 
 def test_add_github_workload(runner, session_factory, monkeypatch):
     monkeypatch.setattr(
-        cli_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
+        sync_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
     )
 
     result = runner.invoke(
@@ -66,7 +67,7 @@ def test_add_github_workload(runner, session_factory, monkeypatch):
 
 def test_add_github_workload_dry_run(runner, session_factory, monkeypatch):
     monkeypatch.setattr(
-        cli_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
+        sync_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
     )
 
     result = runner.invoke(
@@ -118,7 +119,7 @@ def test_add_workload_reuses_existing_ef_project(runner, session_factory, monkey
         s.commit()
 
     monkeypatch.setattr(
-        cli_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
+        sync_module.requests, "get", lambda *a, **kw: _make_response({"id": 42})
     )
 
     result = runner.invoke(
@@ -162,7 +163,7 @@ def test_add_workload_rejects_disguised_or_non_https_host(
     def fail(*a, **kw):
         raise AssertionError("network must not be touched for a rejected URL")
 
-    monkeypatch.setattr(cli_module.requests, "get", fail)
+    monkeypatch.setattr(sync_module.requests, "get", fail)
 
     result = runner.invoke(cli_module.cli, ["add-workload", "eclipse-foo", url])
 
@@ -180,7 +181,7 @@ def test_missing_database_url_fails_early(runner, monkeypatch):
     def fail(*a, **kw):
         raise AssertionError("network must not be touched when DB URL is missing")
 
-    monkeypatch.setattr(cli_module.requests, "get", fail)
+    monkeypatch.setattr(sync_module.requests, "get", fail)
 
     result = runner.invoke(
         cli_module.cli,
@@ -192,7 +193,7 @@ def test_missing_database_url_fails_early(runner, monkeypatch):
 
 def test_add_dt_project(runner, session_factory, monkeypatch, dt_api_key):
     monkeypatch.setattr(
-        cli_module.requests,
+        sync_module.requests,
         "get",
         lambda *a, **kw: _make_response(
             [
@@ -227,7 +228,7 @@ def test_add_dt_project(runner, session_factory, monkeypatch, dt_api_key):
 
 def test_add_dt_project_dry_run(runner, session_factory, monkeypatch, dt_api_key):
     monkeypatch.setattr(
-        cli_module.requests,
+        sync_module.requests,
         "get",
         lambda *a, **kw: _make_response(
             [
@@ -259,7 +260,9 @@ def test_add_dt_project_dry_run(runner, session_factory, monkeypatch, dt_api_key
 
 
 def test_add_dt_project_no_match(runner, monkeypatch, dt_api_key):
-    monkeypatch.setattr(cli_module.requests, "get", lambda *a, **kw: _make_response([]))
+    monkeypatch.setattr(
+        sync_module.requests, "get", lambda *a, **kw: _make_response([])
+    )
 
     result = runner.invoke(
         cli_module.cli,
@@ -277,7 +280,7 @@ def test_add_dt_project_no_match(runner, monkeypatch, dt_api_key):
 
 def test_add_dt_project_child_not_found(runner, monkeypatch, dt_api_key):
     monkeypatch.setattr(
-        cli_module.requests,
+        sync_module.requests,
         "get",
         lambda *a, **kw: _make_response(
             [{"name": "Eclipse Foo", "uuid": "parent-uuid", "children": []}]
