@@ -1,0 +1,10 @@
+# Example curated file for trying `pia sync` against the local docker-compose
+# stack (see README "Trying the sync CLI locally"). The dependency_track mapping
+# below matches the demo project that `make dt-token` creates in DependencyTrack.
+projects:
+  - id: eclipse-foo
+    workloads:
+      - https://github.com/eclipse-csi/otterdog
+    dependency_track:
+      - parent: "Eclipse Foo"
+        project: foo-server

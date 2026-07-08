@@ -24,6 +24,10 @@ run: ## Run the application in development mode with docker compose
 stop: ## Stop the application
 	docker compose down
 
+.PHONY: dt-token
+dt-token: ## Bootstrap the local DependencyTrack and print/save an API token
+	uv run python scripts/dt_bootstrap.py
+
 .PHONY: test
 test: ## Run tests with pytest
 	uv run pytest

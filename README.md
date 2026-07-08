@@ -83,3 +83,33 @@ PIA_DATABASE_URL=... PIA_DEPENDENCY_TRACK_API_KEY=... \
 ```
 
 In production `pia sync` runs as an in-cluster Job; see the deployment repo.
+
+#### Trying the sync CLI locally
+
+The `docker compose` stack includes a local DependencyTrack API server, so you
+can exercise `pia sync` end to end.
+
+1. **Start the stack.** This brings up Postgres, DependencyTrack, and the app
+   (which applies migrations on startup):
+   ```shell
+   docker compose up -d
+   ```
+
+2. **Provision a DependencyTrack token.** DependencyTrack takes 1-2 minutes to
+   become ready on first start; this command waits for it, then creates an API
+   token (and a demo project) and saves it to `.dt-api-key` and `.env`:
+   ```shell
+   make dt-token
+   ```
+   The DependencyTrack UI/API is at http://localhost:8080 (admin login is
+   printed by the command).
+
+3. **Run a sync** against the local database and DependencyTrack. The provided
+   [`projects.local.yaml`](projects.local.yaml) matches the demo project:
+   ```shell
+   export PIA_DATABASE_URL=postgresql://pia:pia@localhost:5432/pia
+   export PIA_DEPENDENCY_TRACK_API_KEY=$(cat .dt-api-key)
+   uv run pia sync projects.local.yaml --dt-url http://localhost:8080 --dry-run
+   ```
+   Drop `--dry-run` to apply, then re-run to see an empty (idempotent) plan.
+   Edit `projects.local.yaml` and re-run to see updates and deletions in the plan.

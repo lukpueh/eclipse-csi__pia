@@ -41,3 +41,7 @@ htmlcov/
 
 # PIA specific
 *.log
+
+# Local dev secrets (written by `make dt-token`)
+.env
+.dt-api-key
