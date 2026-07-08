@@ -1,6 +1,7 @@
 # Example curated file for trying `pia sync` against the local docker-compose
-# stack (see README "Trying the sync CLI locally"). The dependency_track mapping
-# below matches the demo project that `make dt-token` creates in DependencyTrack.
+# stack (see README "Trying the sync CLI locally"). Run the sync with
+# --create-dt-projects to have the referenced DependencyTrack projects created if
+# they don't exist yet.
 projects:
   - id: eclipse-foo
     workloads:

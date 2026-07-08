@@ -3,8 +3,7 @@
 
 Waits for the DependencyTrack API (from docker-compose) to come up, changes the
 default admin password on first run, provisions a team with the permissions the
-PIA app and `pia sync` need, generates an API token, and creates a small demo
-project hierarchy so `dependency_track` mappings resolve.
+PIA app and `pia sync` need, and generates an API token.
 
 The token is printed and written to `.dt-api-key` and `.env` (as
 `PIA_DEPENDENCY_TRACK_API_KEY=...`), so docker-compose and a local `pia` pick it
@@ -39,10 +38,6 @@ TEAM_PERMISSIONS = [
     "PROJECT_CREATION_UPLOAD",
     "BOM_UPLOAD",
 ]
-# Demo project hierarchy so a `dependency_track: [{parent, project}]` mapping
-# resolves out of the box (matches projects.local.yaml).
-DEMO_ROOT = "Eclipse Foo"
-DEMO_CHILD = "foo-server"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KEY_FILE = REPO_ROOT / ".dt-api-key"
@@ -146,46 +141,6 @@ def generate_api_key(auth: dict[str, str], team_uuid: str) -> str:
     return body["key"] if isinstance(body, dict) else str(body)
 
 
-def _find_root_project(auth: dict[str, str], name: str) -> dict | None:
-    r = requests.get(
-        f"{DT_URL}/api/v1/project",
-        headers=auth,
-        params={"name": name, "onlyRoot": "true"},
-        timeout=15,
-    )
-    r.raise_for_status()
-    for p in r.json():
-        if p.get("name") == name:
-            return p
-    return None
-
-
-def ensure_demo_projects(auth: dict[str, str]) -> None:
-    """Create DEMO_ROOT with a DEMO_CHILD child if they don't already exist."""
-    root = _find_root_project(auth, DEMO_ROOT)
-    if root is None:
-        r = requests.put(
-            f"{DT_URL}/api/v1/project",
-            headers=auth,
-            json={"name": DEMO_ROOT},
-            timeout=15,
-        )
-        r.raise_for_status()
-        root = r.json()
-        log(f"Created demo root project {DEMO_ROOT!r}.")
-
-    children = {c.get("name") for c in root.get("children", []) or []}
-    if DEMO_CHILD not in children:
-        r = requests.put(
-            f"{DT_URL}/api/v1/project",
-            headers=auth,
-            json={"name": DEMO_CHILD, "parent": {"uuid": root["uuid"]}},
-            timeout=15,
-        )
-        r.raise_for_status()
-        log(f"Created demo child project {DEMO_CHILD!r} under {DEMO_ROOT!r}.")
-
-
 def write_key(key: str) -> None:
     KEY_FILE.write_text(key + "\n")
     # Upsert PIA_DEPENDENCY_TRACK_API_KEY into .env, preserving other lines.
@@ -207,7 +162,6 @@ def main() -> None:
 
     team_uuid = ensure_team(auth)
     ensure_permissions(auth, team_uuid)
-    ensure_demo_projects(auth)
     key = generate_api_key(auth, team_uuid)
     write_key(key)
 
@@ -218,10 +172,14 @@ def main() -> None:
     print(f"  Token: {key}")
     print(f"  Saved to: {KEY_FILE.name} and {ENV_FILE.name}")
     print("=" * 70)
-    print("\nTry the sync CLI locally:\n")
+    print("\nTry the sync CLI locally (--create-dt-projects creates the DT")
+    print("projects referenced in the file if they don't exist yet):\n")
     print("  export PIA_DATABASE_URL=postgresql://pia:pia@localhost:5432/pia")
     print("  export PIA_DEPENDENCY_TRACK_API_KEY=$(cat .dt-api-key)")
-    print(f"  uv run pia sync projects.local.yaml --dt-url {DT_URL} --dry-run\n")
+    print(
+        f"  uv run pia sync projects.local.yaml --dt-url {DT_URL} "
+        "--create-dt-projects --dry-run\n"
+    )
 
 
 if __name__ == "__main__":
