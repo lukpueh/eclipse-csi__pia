@@ -9,7 +9,7 @@ Usage Example
 -------------
     PIA_DATABASE_URL=postgresql://user:secret@localhost:5432/pia \
     PIA_DEPENDENCY_TRACK_API_KEY=<API key with VIEW_PORTFOLIO permission> \
-    PIA_GITHUB_TOKEN=<optional token to lift the anonymous rate limit> \
+    PIA_GITHUB_TOKEN=<optional token with public read perission to lift the anonymous rate limit> \
         uv run pia sync projects.yaml --dt-url https://sbom.eclipse.org --dry-run
 
 """

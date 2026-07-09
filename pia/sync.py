@@ -220,6 +220,9 @@ def resolve_dt_child_uuid(
     creation is logged and reported via the ``DT_PENDING_UUID`` sentinel. An
     *ambiguous* match (more than one) is always an error, even with ``create``.
     """
+
+    # TODO: Review carefully, maybe simplify
+
     parent = root_cache.get(parent_name) if root_cache is not None else None
     if parent is None:
         roots = _dt_search_root_projects(dt_url, parent_name, api_key)
@@ -336,6 +339,11 @@ def build_desired(
     When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
     are created (or, under ``dry_run``, reported as pending without being created).
     """
+
+
+    # TODO: Review carefully
+    # TODO: Do I want dt projects to be created, even if db command is not executed?
+
     desired = Desired()
     owner_id_cache: dict[str, str] = {}
     dt_root_cache: dict[str, dict[str, Any]] = {}
