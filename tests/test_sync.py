@@ -372,7 +372,9 @@ def test_sync_apply_creates_rows(runner, tmp_path, session_factory, patch_cli):
         assert s.query(EclipseFoundationProject).count() == 1
 
 
-def test_sync_deletions_require_yes(runner, tmp_path, session_factory, patch_cli):
+def test_sync_deletions_require_allow_flag(
+    runner, tmp_path, session_factory, patch_cli
+):
     # Seed rows that the file below will no longer contain.
     with session_factory() as s:
         s.add_all(
@@ -396,7 +398,8 @@ def test_sync_deletions_require_yes(runner, tmp_path, session_factory, patch_cli
         """,
     )
 
-    # Without --yes, a plan with deletions is refused and nothing changes.
+    # Without --allow-db-deletions, a plan with deletions is refused and
+    # nothing changes.
     result = runner.invoke(cli_module.cli, ["sync", f])
     assert result.exit_code != 0
     assert "deletions" in result.output
@@ -406,8 +409,8 @@ def test_sync_deletions_require_yes(runner, tmp_path, session_factory, patch_cli
             s.query(EclipseFoundationProject).filter_by(id="eclipse-stale").count() == 1
         )
 
-    # With --yes, the stale workload and now-empty project are removed.
-    result = runner.invoke(cli_module.cli, ["sync", f, "--yes"])
+    # With --allow-db-deletions, the stale workload and now-empty project are removed.
+    result = runner.invoke(cli_module.cli, ["sync", f, "--allow-db-deletions"])
     assert result.exit_code == 0, result.output
     with session_factory() as s:
         assert s.query(JenkinsWorkload).count() == 0

@@ -61,7 +61,7 @@ def _make_session() -> Session:
     help="Validate the file only; performs no database or network access.",
 )
 @click.option(
-    "--yes",
+    "--allow-db-deletions",
     is_flag=True,
     help="Apply the plan even when it contains deletions in the PIA database.",
 )
@@ -77,7 +77,7 @@ def sync(
     dt_url: str | None,
     dry_run: bool,
     check: bool,
-    yes: bool,
+    allow_db_deletions: bool,
     create_dt_projects: bool,
 ) -> None:
     """Reconcile all authorizations from a curated FILE into the database.
@@ -117,11 +117,11 @@ def sync(
             session.rollback()
             return
 
-        if (plan.ef_delete or plan.deletes) and not yes:
+        if (plan.ef_delete or plan.deletes) and not allow_db_deletions:
             session.rollback()
             raise click.ClickException(
-                "Plan contains deletions; re-run with --yes to apply "
-                "(or --dry-run to preview)."
+                "Plan contains deletions; re-run with --allow-db-deletions to "
+                "apply (or --dry-run to preview)."
             )
 
         apply_plan(session, plan)

@@ -363,7 +363,7 @@ installed as a console entry point via `pyproject.toml` and connects to the DB
 using the `PIA_DATABASE_URL` environment variable, e.g.
 `postgresql://user:secret@1.2.3.4:5432/pia`.
 
-#### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--yes] [--create-dt-projects]`
+#### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--allow-db-deletions] [--create-dt-projects]`
 
 Reconciles the whole authorization state to match a curated file (the source of
 truth). The file lists Eclipse Foundation projects, each with a flat list of
@@ -384,8 +384,8 @@ projects:
 `sync` resolves the external data (GitHub owner ids, DependencyTrack child UUIDs),
 diffs the desired state against the database, prints a plan, and applies it —
 **creating, updating and deleting** rows so the database matches the file. Flags: `--dry-run` prints the plan without writing; `--check`
-validates the file's shape only (no database or network); `--yes` is required to
-apply a plan that contains deletions. `--create-dt-projects` creates missing
+validates the file's shape only (no database or network); `--allow-db-deletions`
+is required to apply a plan that contains deletions. `--create-dt-projects` creates missing
 DependencyTrack parent/child projects instead of failing when they do not exist
 (requires a DT API key with project-creation permission; under `--dry-run` the
 creations are only reported, not performed). `--dt-url` is the DependencyTrack
