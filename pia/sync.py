@@ -1,13 +1,12 @@
 """Declarative sync of project authorizations from a curated file into the DB.
 
-The imperative `add-workload` / `add-dt-project` commands append single rows. This
-module reconciles the whole authorization state against a human-curated file (the
-single source of truth): it creates new entries, updates changed ones, and deletes
-entries that are no longer in the file.
+Reconciles the whole authorization state against a human-curated file (the single
+source of truth): it creates new entries, updates changed ones, and deletes entries
+that are no longer in the file.
 
 The file is a list of Eclipse Foundation projects, each with a flat list of workload
-URLs (GitHub repo or Jenkins issuer — the type is inferred from the host, exactly as
-`add-workload` does) and a list of DependencyTrack (parent, project) mappings:
+URLs (GitHub repo or Jenkins issuer — the type is inferred from the host) and a list
+of DependencyTrack (parent, project) mappings:
 
     projects:
       - id: technology.foo
@@ -92,7 +91,7 @@ def load_projects_file(path: str) -> ProjectsFile:
 
 
 def classify_workload_url(url: str) -> tuple[str, str, str]:
-    """Classify a workload URL by host, mirroring ``add-workload``.
+    """Classify a workload URL by host.
 
     Returns ``("github", repo_owner, repo_name)`` for a github.com repo URL or
     ``("jenkins", issuer, "")`` for a ci.eclipse.org issuer URL. Raises
@@ -143,7 +142,7 @@ def validate_projects_file(pf: ProjectsFile) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Resolution (external lookups) — shared with the imperative CLI commands
+# Resolution (external lookups)
 # --------------------------------------------------------------------------- #
 
 

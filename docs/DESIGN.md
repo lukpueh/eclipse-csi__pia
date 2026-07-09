@@ -358,47 +358,17 @@ Metrics to track:
 
 ### 5.5 CLI Tool
 
-PIA includes a management CLI (`pia`) for registering workloads and
-DependencyTrack projects. It is installed as a console entry point via
-`pyproject.toml` and connects to the DB using the `PIA_DATABASE_URL`
-environment variable, e.g. `postgresql://user:secret@1.2.3.4:5432/pia`.
-
-#### `pia add-workload <ef_project_id> <url>`
-
-Registers a new workload for an Eclipse Foundation project. The workload type
-is determined by the URL:
-
-- **GitHub** (URL contains `github.com`): Parses `owner` and `repo` from the
-  URL path. Queries the GitHub API (`GET https://api.github.com/users/{owner}`)
-  to fetch the numeric `repo_owner_id`. Creates a `GitHubWorkload`.
-- **Jenkins** (URL starts with `https://ci.eclipse.org`): Uses the URL as
-  `issuer`. Creates a `JenkinsWorkload`.
-
-If the `EclipseFoundationProject` row for `ef_project_id` does not exist, it is
-created automatically.
-
-#### `pia add-dt-project <ef_project_id> <dt_url> <parent_name> <project_name>`
-
-Registers a DependencyTrack project for an Eclipse Foundation project. Looks up
-the project in DependencyTrack by name hierarchy:
-
-1. Find exactly one root project by `parent_name`.
-2. Find exactly one child project by `project_name`
-3. Store `DependencyTrackProject(name=project_name, parent_uuid=<child project UUID>)`
-
-The `dt_url` argument is the DependencyTrack base URL (e.g.
-`https://sbom.eclipse.org`). Authentication uses the `PIA_DEPENDENCY_TRACK_API_KEY`
-environment variable. The API key requires at least the `VIEW_PORTFOLIO` permission.
-
-If the `EclipseFoundationProject` row for `ef_project_id` does not exist, it is
-created automatically.
+PIA includes a management CLI (`pia`) for managing project authorizations. It is
+installed as a console entry point via `pyproject.toml` and connects to the DB
+using the `PIA_DATABASE_URL` environment variable, e.g.
+`postgresql://user:secret@1.2.3.4:5432/pia`.
 
 #### `pia sync <file> [--dt-url <url>] [--dry-run] [--check] [--yes] [--create-dt-projects]`
 
 Reconciles the whole authorization state to match a curated file (the source of
 truth). The file lists Eclipse Foundation projects, each with a flat list of
-workload URLs (GitHub repo or Jenkins issuer — classified by host as in
-`add-workload`) and a list of DependencyTrack `(parent, project)` mappings:
+workload URLs (GitHub repo or Jenkins issuer — classified by host) and a list of
+DependencyTrack `(parent, project)` mappings:
 
 ```yaml
 projects:
@@ -411,10 +381,9 @@ projects:
         project: foo-server
 ```
 
-`sync` resolves the same external data as the `add-*` commands (GitHub owner ids,
-DependencyTrack child UUIDs), diffs the desired state against the database, prints
-a plan, and applies it — **creating, updating and deleting** rows so the database
-matches the file. Flags: `--dry-run` prints the plan without writing; `--check`
+`sync` resolves the external data (GitHub owner ids, DependencyTrack child UUIDs),
+diffs the desired state against the database, prints a plan, and applies it —
+**creating, updating and deleting** rows so the database matches the file. Flags: `--dry-run` prints the plan without writing; `--check`
 validates the file's shape only (no database or network); `--yes` is required to
 apply a plan that contains deletions. `--create-dt-projects` creates missing
 DependencyTrack parent/child projects instead of failing when they do not exist

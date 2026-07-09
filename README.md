@@ -69,9 +69,9 @@ docker compose run --rm pia alembic revision --autogenerate --message "MESSAGE"
 ### Managing Authorizations
 
 Project authorizations (workloads and DependencyTrack targets) live in the
-database. Register them one at a time with `pia add-workload` / `pia add-dt-project`,
-or reconcile the whole set declaratively from a curated file with `pia sync`
-(see the [CLI section of the design doc](docs/DESIGN.md#55-cli-tool)):
+database and are managed declaratively: reconcile the whole set from a curated
+file with `pia sync` (see the
+[CLI section of the design doc](docs/DESIGN.md#55-cli-tool)):
 
 ```shell
 # Validate a curated file's shape (no database or network access)
