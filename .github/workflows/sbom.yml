@@ -41,14 +41,15 @@ jobs:
         upload-artifact: false
 
     - name: Upload SBOM 1
-      uses: lukpueh/eclipse-csi__workflows/upload-sbom@d6afe9284b1608ab51fc7fca886fbf820341a1a6
+      uses: lukpueh/eclipse-csi__workflows/upload-sbom@91b28c080e709634ecfe4ce97bed36913b630790
       with:
         sbom-file: sbom.json
         product-name: ${{ env.NAME }}
         product-version: ${{ env.VERSION }}
+        staging: 'true'
 
     - name: Upload SBOM 2
-      uses: lukpueh/eclipse-csi__workflows/upload-sbom@d6afe9284b1608ab51fc7fca886fbf820341a1a6
+      uses: lukpueh/eclipse-csi__workflows/upload-sbom@91b28c080e709634ecfe4ce97bed36913b630790
       with:
         sbom-file: sbom.json
         product-name: ${{ env.NAME }}-2
