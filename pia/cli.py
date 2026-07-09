@@ -63,14 +63,14 @@ def _make_session() -> Session:
 @click.option(
     "--yes",
     is_flag=True,
-    help="Apply the plan even when it contains deletions.",
+    help="Apply the plan even when it contains deletions in the PIA database.",
 )
 @click.option(
     "--create-dt-projects",
     is_flag=True,
-    help="Create missing DependencyTrack parent/child projects instead of "
-    "failing when they do not exist (requires a DT API key with project "
-    "creation permission).",
+    help="Create missing parent/child projects on DependencyTrack instead of "
+    "failing when they do not exist; performs no deletion on DependencyTrack; "
+    "requires a DT API key with PORTFOLIO_MANAGEMENT permission.",
 )
 def sync(
     file: str,
@@ -87,8 +87,9 @@ def sync(
     creating, updating and deleting rows to match the file.
 
     Requires PIA_DATABASE_URL. DependencyTrack mappings additionally require
-    --dt-url and PIA_DEPENDENCY_TRACK_API_KEY. PIA_GITHUB_TOKEN is optional and
-    only lifts the anonymous GitHub rate limit.
+    --dt-url and PIA_DEPENDENCY_TRACK_API_KEY (with VIEW_PORTFOLIO permission).
+    PIA_GITHUB_TOKEN is optional and only lifts the anonymous GitHub rate
+    limit.
     """
     pf = load_projects_file(file)
     validate_projects_file(pf)
