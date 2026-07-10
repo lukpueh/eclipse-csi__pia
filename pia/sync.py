@@ -201,6 +201,22 @@ def _dt_create_project(
     return response.json()
 
 
+def _dt_pick_one(
+    matches: list[dict[str, Any]], describe: str, create: bool
+) -> dict[str, Any] | None:
+    """Return the single match, or ``None`` when there are none and ``create`` is set.
+
+    Raises on ambiguity (>1) always, and on zero matches unless ``create`` allows
+    the caller to create the missing project. ``describe`` names the thing being
+    resolved, e.g. ``"root DependencyTrack project named 'Foo'"``.
+    """
+    if len(matches) != 1 and not (create and not matches):
+        raise click.ClickException(
+            f"Expected exactly one {describe}, found {len(matches)}"
+        )
+    return matches[0] if matches else None
+
+
 def resolve_dt_child_uuid(
     dt_url: str,
     parent_name: str,
@@ -220,61 +236,46 @@ def resolve_dt_child_uuid(
     creation is logged and reported via the ``DT_PENDING_UUID`` sentinel. An
     *ambiguous* match (more than one) is always an error, even with ``create``.
     """
+    child_note = (
+        f"[dry-run] would create DependencyTrack project {project_name!r} "
+        f"under {parent_name!r}"
+    )
 
-    # TODO: Review carefully, maybe simplify
-
+    # Resolve (or, with --create, provision) the root project, caching it so other
+    # mappings that reuse this root neither re-query nor re-create it.
     parent = root_cache.get(parent_name) if root_cache is not None else None
     if parent is None:
         roots = _dt_search_root_projects(dt_url, parent_name, api_key)
-        if len(roots) > 1:
-            raise click.ClickException(
-                f"Expected exactly one root DependencyTrack project named "
-                f"{parent_name!r}, found {len(roots)}"
-            )
-        if len(roots) == 1:
-            parent = roots[0]
-            parent.setdefault("children", [])
-        elif not create:
-            raise click.ClickException(
-                f"Expected exactly one root DependencyTrack project named "
-                f"{parent_name!r}, found 0"
-            )
+        match = _dt_pick_one(
+            roots, f"root DependencyTrack project named {parent_name!r}", create
+        )
+        if match is not None:
+            parent = match
         elif dry_run:
             logger.info(
                 f"[dry-run] would create DependencyTrack root project {parent_name!r}"
             )
-            parent = {"uuid": None, "children": [], "_pending": True}
+            parent = {"uuid": None, "_pending": True}
         else:
             parent = _dt_create_project(dt_url, parent_name, api_key)
-            parent.setdefault("children", [])
+        parent.setdefault("children", [])
         if root_cache is not None:
             root_cache[parent_name] = parent
 
+    # A pending root (dry-run) has no real UUID to parent a child lookup under.
     if parent.get("_pending"):
-        logger.info(
-            f"[dry-run] would create DependencyTrack project {project_name!r} "
-            f"under {parent_name!r}"
-        )
+        logger.info(child_note)
         return DT_PENDING_UUID
 
-    children = [c for c in parent.get("children", []) if c.get("name") == project_name]
-    if len(children) > 1:
-        raise click.ClickException(
-            f"Expected exactly one child named {project_name!r} under "
-            f"{parent_name!r}, found {len(children)}"
-        )
-    if len(children) == 1:
-        return children[0]["uuid"]
-    if not create:
-        raise click.ClickException(
-            f"Expected exactly one child named {project_name!r} under "
-            f"{parent_name!r}, found 0"
-        )
+    # Resolve (or provision) the child under the resolved root.
+    children = [c for c in parent["children"] if c.get("name") == project_name]
+    match = _dt_pick_one(
+        children, f"child named {project_name!r} under {parent_name!r}", create
+    )
+    if match is not None:
+        return match["uuid"]
     if dry_run:
-        logger.info(
-            f"[dry-run] would create DependencyTrack project {project_name!r} "
-            f"under {parent_name!r}"
-        )
+        logger.info(child_note)
         return DT_PENDING_UUID
 
     child = _dt_create_project(
