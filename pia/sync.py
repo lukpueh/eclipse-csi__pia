@@ -290,6 +290,12 @@ def resolve_dt_child_uuid(
 # Desired state
 # --------------------------------------------------------------------------- #
 
+# Below classes mirror the ORM models in models.py but deliberately omit db
+# concerns (sessions, autoincrement PKs, etc.). They carry only the resolved
+# fields from the curated input file and subsequent DT and GH API lookups. They
+# are used to compute a diff to the current state, and are converted into
+# actual ORM instances eventually.
+
 
 @dataclass(frozen=True)
 class DesiredGitHub:
