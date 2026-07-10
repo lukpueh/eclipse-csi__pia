@@ -327,8 +327,8 @@ class Desired:
 
 def build_desired(
     pf: ProjectsFile,
-    dt_url: str | None,
-    dt_api_key: str | None,
+    dt_url: str,
+    dt_api_key: str,
     github_token: str | None = None,
     create_dt_projects: bool = False,
     dry_run: bool = False,
@@ -336,15 +336,10 @@ def build_desired(
     """Resolve the curated file into a fully-populated desired state.
 
     Performs the external lookups (GitHub owner ids, DependencyTrack child UUIDs).
-    ``dt_url``/``dt_api_key`` are required only if any DependencyTrack mappings exist.
+    ``dt_url`` and ``dt_api_key`` are required (the CLI validates their presence).
     When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
     are created (or, under ``dry_run``, reported as pending without being created).
     """
-
-
-    # TODO: Review carefully
-    # TODO: Do I want dt projects to be created, even if db command is not executed?
-
     desired = Desired()
     owner_id_cache: dict[str, str] = {}
     dt_root_cache: dict[str, dict[str, Any]] = {}
@@ -371,11 +366,6 @@ def build_desired(
                 )
 
         for dt in project.dependency_track:
-            if not dt_url or not dt_api_key:
-                raise click.ClickException(
-                    "DependencyTrack mappings present but --dt-url / "
-                    "PIA_DEPENDENCY_TRACK_API_KEY not provided"
-                )
             child_uuid = resolve_dt_child_uuid(
                 dt_url,
                 dt.parent,

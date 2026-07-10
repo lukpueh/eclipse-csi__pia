@@ -330,6 +330,24 @@ def test_sync_check_is_offline(runner, tmp_path, monkeypatch):
     assert "valid" in result.output
 
 
+def test_sync_requires_dt_config_even_without_dt_entries(
+    runner, tmp_path, session_factory, patch_cli
+):
+    # DT config is required unconditionally, even for a file with no
+    # dependency_track entries. Here --dt-url is omitted, so sync must refuse.
+    f = _write(
+        tmp_path,
+        """
+        projects:
+          - id: eclipse-foo
+            workloads: ["https://github.com/eclipse-foo/repo"]
+        """,
+    )
+    result = runner.invoke(cli_module.cli, ["sync", f])
+    assert result.exit_code != 0
+    assert "--dt-url and PIA_DEPENDENCY_TRACK_API_KEY are required" in result.output
+
+
 def test_sync_dry_run_writes_nothing(runner, tmp_path, session_factory, patch_cli):
     f = _write(
         tmp_path,
@@ -400,7 +418,7 @@ def test_sync_deletions_require_allow_flag(
 
     # Without --allow-db-deletions, a plan with deletions is refused and
     # nothing changes.
-    result = runner.invoke(cli_module.cli, ["sync", f])
+    result = runner.invoke(cli_module.cli, ["sync", f, "--dt-url", "https://dt"])
     assert result.exit_code != 0
     assert "deletions" in result.output
     with session_factory() as s:
@@ -410,7 +428,9 @@ def test_sync_deletions_require_allow_flag(
         )
 
     # With --allow-db-deletions, the stale workload and now-empty project are removed.
-    result = runner.invoke(cli_module.cli, ["sync", f, "--allow-db-deletions"])
+    result = runner.invoke(
+        cli_module.cli, ["sync", f, "--dt-url", "https://dt", "--allow-db-deletions"]
+    )
     assert result.exit_code == 0, result.output
     with session_factory() as s:
         assert s.query(JenkinsWorkload).count() == 0
