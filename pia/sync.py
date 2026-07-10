@@ -399,12 +399,19 @@ def build_desired(
 class Plan:
     """A reconciliation plan: what to create, update, and delete."""
 
+    # Eclipse Foundation projects are kept in their own ef_create/ef_delete
+    # lists, separate from the creates/updates/deletes lists of child dt
+    # projects and workloads, to assure foreign-key ordering: child rows
+    # reference the parent via ef_project_id, so they must be deleted before
+    # their parents, and vice-versa parents must be created before their
+    # children. Note: There is no ef_update row, because their id is their
+    # whole identity, so they can only be created or deleted.
+
     ef_create: list[str] = field(default_factory=list)
     ef_delete: list[str] = field(default_factory=list)
-    creates: list[Any] = field(default_factory=list)  # ORM instances to add
-    # (orm_obj, {field: new_value})
+    creates: list[Any] = field(default_factory=list)
     updates: list[tuple[Any, dict[str, Any]]] = field(default_factory=list)
-    deletes: list[Any] = field(default_factory=list)  # ORM instances to delete
+    deletes: list[Any] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)  # human-readable, in plan order
 
     def is_empty(self) -> bool:
