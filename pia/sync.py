@@ -197,22 +197,6 @@ def _dt_create_project(
     return response.json()
 
 
-def _dt_pick_one(
-    matches: list[dict[str, Any]], describe: str, create: bool
-) -> dict[str, Any] | None:
-    """Return the single match, or ``None`` when there are none and ``create`` is set.
-
-    Raises on ambiguity (>1) always, and on zero matches unless ``create`` allows
-    the caller to create the missing project. ``describe`` names the thing being
-    resolved, e.g. ``"root DependencyTrack project named 'Foo'"``.
-    """
-    if len(matches) != 1 and not (create and not matches):
-        raise click.ClickException(
-            f"Expected exactly one {describe}, found {len(matches)}"
-        )
-    return matches[0] if matches else None
-
-
 def resolve_dt_child_uuid(
     dt_url: str,
     parent_name: str,
@@ -233,29 +217,31 @@ def resolve_dt_child_uuid(
     even with ``create``.
     """
     # Resolve (or, with --create, provision) the root project, caching it so other
-    # mappings that reuse this root neither re-query nor re-create it.
+    # mappings that reuse this root neither re-query nor re-create it. A missing
+    # match is only tolerated when ``create`` is set; ambiguity (>1) is always an
+    # error.
     parent = root_cache.get(parent_name) if root_cache is not None else None
     if parent is None:
         roots = _dt_search_root_projects(dt_url, parent_name, api_key)
-        match = _dt_pick_one(
-            roots, f"root DependencyTrack project named {parent_name!r}", create
-        )
-        parent = (
-            match
-            if match is not None
-            else _dt_create_project(dt_url, parent_name, api_key)
-        )
+        if len(roots) != 1 and not (create and not roots):
+            raise click.ClickException(
+                f"Expected exactly one root DependencyTrack project named "
+                f"{parent_name!r}, found {len(roots)}"
+            )
+        parent = roots[0] if roots else _dt_create_project(dt_url, parent_name, api_key)
         parent.setdefault("children", [])
         if root_cache is not None:
             root_cache[parent_name] = parent
 
     # Resolve (or provision) the child under the resolved root.
     children = [c for c in parent["children"] if c.get("name") == project_name]
-    match = _dt_pick_one(
-        children, f"child named {project_name!r} under {parent_name!r}", create
-    )
-    if match is not None:
-        return match["uuid"]
+    if len(children) != 1 and not (create and not children):
+        raise click.ClickException(
+            f"Expected exactly one child named {project_name!r} under "
+            f"{parent_name!r}, found {len(children)}"
+        )
+    if children:
+        return children[0]["uuid"]
 
     child = _dt_create_project(
         dt_url, project_name, api_key, parent_uuid=parent["uuid"]
