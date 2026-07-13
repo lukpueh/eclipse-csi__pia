@@ -396,21 +396,6 @@ def build_desired(
 
 
 @dataclass
-class Change:
-    """One rendered plan entry, tagged with its owning project for grouping.
-
-    ``format_plan`` groups changes under a per-project header, so ``body`` omits
-    the owning project (an update keeps it inline only when ef_project_id itself
-    changed, since that is carried in the change detail).
-    """
-
-    project: str  # grouping key: the project this entry belongs to
-    kind: str  # "github" | "jenkins" | "dt"
-    op: str  # "+" create | "~" update | "-" delete
-    body: str  # entry text without the op prefix
-
-
-@dataclass
 class Plan:
     """A reconciliation plan: what to create, update, and delete."""
 
@@ -427,7 +412,7 @@ class Plan:
     creates: list[Any] = field(default_factory=list)
     updates: list[tuple[Any, dict[str, Any]]] = field(default_factory=list)
     deletes: list[Any] = field(default_factory=list)
-    changes: list[Change] = field(default_factory=list)  # rendered by format_plan
+    lines: list[str] = field(default_factory=list)  # human-readable, in plan order
 
     def is_empty(self) -> bool:
         return not (
@@ -458,15 +443,14 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
     ef_cur, gh_cur, jk_cur, dt_cur = _load_current(session)
     plan = Plan()
 
-    # Eclipse Foundation projects. These become the per-project group headers in
-    # format_plan, so they need no Change entry of their own.
+    # Eclipse Foundation projects
     for ef_id in sorted(desired.ef_ids - ef_cur):
         plan.ef_create.append(ef_id)
+        plan.lines.append(f"+ project {ef_id}")
     for ef_id in sorted(ef_cur - desired.ef_ids):
         plan.ef_delete.append(ef_id)
+        plan.lines.append(f"- project {ef_id}")
 
-    # A change is grouped under its desired project (create/update) or, for a
-    # deletion, the project the row currently belongs to.
     # GitHub workloads (keyed by repo identity)
     for gh_key in sorted(desired.github):
         dg = desired.github[gh_key]
@@ -481,7 +465,7 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
                     repo_owner_id=dg.repo_owner_id,
                 )
             )
-            plan.changes.append(Change(dg.ef_project_id, "github", "+", gh_label))
+            plan.lines.append(f"+ {gh_label} (project {dg.ef_project_id})")
         else:
             gh_changes: dict[str, Any] = {}
             if gh_row.ef_project_id != dg.ef_project_id:
@@ -490,25 +474,14 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
                 gh_changes["repo_owner_id"] = dg.repo_owner_id
             if gh_changes:
                 plan.updates.append((gh_row, gh_changes))
-                plan.changes.append(
-                    Change(
-                        dg.ef_project_id,
-                        "github",
-                        "~",
-                        f"{gh_label} ({_fmt_changes(gh_row, gh_changes)})",
-                    )
-                )
+                plan.lines.append(f"~ {gh_label} ({_fmt_changes(gh_row, gh_changes)})")
     for gh_key in sorted(gh_cur):
         if gh_key not in desired.github:
             gh_row = gh_cur[gh_key]
             plan.deletes.append(gh_row)
-            plan.changes.append(
-                Change(
-                    gh_row.ef_project_id,
-                    "github",
-                    "-",
-                    f"github {gh_row.repo_owner}/{gh_row.repo_name}",
-                )
+            plan.lines.append(
+                f"- github {gh_row.repo_owner}/{gh_row.repo_name} "
+                f"(project {gh_row.ef_project_id})"
             )
 
     # Jenkins workloads (keyed by issuer)
@@ -519,33 +492,24 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
             plan.creates.append(
                 JenkinsWorkload(ef_project_id=dj.ef_project_id, issuer=dj.issuer)
             )
-            plan.changes.append(
-                Change(dj.ef_project_id, "jenkins", "+", f"jenkins {issuer}")
-            )
+            plan.lines.append(f"+ jenkins {issuer} (project {dj.ef_project_id})")
         elif jk_row.ef_project_id != dj.ef_project_id:
             jk_changes: dict[str, Any] = {"ef_project_id": dj.ef_project_id}
             plan.updates.append((jk_row, jk_changes))
-            plan.changes.append(
-                Change(
-                    dj.ef_project_id,
-                    "jenkins",
-                    "~",
-                    f"jenkins {issuer} ({_fmt_changes(jk_row, jk_changes)})",
-                )
+            plan.lines.append(
+                f"~ jenkins {issuer} ({_fmt_changes(jk_row, jk_changes)})"
             )
     for issuer in sorted(jk_cur):
         if issuer not in desired.jenkins:
             jk_row = jk_cur[issuer]
             plan.deletes.append(jk_row)
-            plan.changes.append(
-                Change(jk_row.ef_project_id, "jenkins", "-", f"jenkins {issuer}")
-            )
+            plan.lines.append(f"- jenkins {issuer} (project {jk_row.ef_project_id})")
 
-    # DependencyTrack projects (keyed by (ef_project_id, name)). The project is
-    # part of the key, so a DT project never moves; only parent_uuid can change.
+    # DependencyTrack projects (keyed by (ef_project_id, name))
     for dt_key in sorted(desired.dt):
         dd = desired.dt[dt_key]
         dt_row = dt_cur.get(dt_key)
+        dt_label = f"dt {dd.ef_project_id}/{dd.name}"
         if dt_row is None:
             plan.creates.append(
                 DependencyTrackProject(
@@ -554,9 +518,7 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
                     parent_uuid=dd.parent_uuid,
                 )
             )
-            plan.changes.append(
-                Change(dd.ef_project_id, "dt", "+", f"dt {dd.name} -> {dd.parent_uuid}")
-            )
+            plan.lines.append(f"+ {dt_label} -> {dd.parent_uuid}")
         else:
             dt_changes: dict[str, Any] = {}
             # Ignore the dry-run "pending creation" sentinel: it is not a real
@@ -568,21 +530,12 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
                 dt_changes["parent_uuid"] = dd.parent_uuid
             if dt_changes:
                 plan.updates.append((dt_row, dt_changes))
-                plan.changes.append(
-                    Change(
-                        dd.ef_project_id,
-                        "dt",
-                        "~",
-                        f"dt {dd.name} ({_fmt_changes(dt_row, dt_changes)})",
-                    )
-                )
+                plan.lines.append(f"~ {dt_label} ({_fmt_changes(dt_row, dt_changes)})")
     for dt_key in sorted(dt_cur):
         if dt_key not in desired.dt:
             dt_row = dt_cur[dt_key]
             plan.deletes.append(dt_row)
-            plan.changes.append(
-                Change(dt_row.ef_project_id, "dt", "-", f"dt {dt_row.name}")
-            )
+            plan.lines.append(f"- dt {dt_row.ef_project_id}/{dt_row.name}")
 
     return plan
 
@@ -591,46 +544,15 @@ def _fmt_changes(obj: Any, changes: dict[str, Any]) -> str:
     return ", ".join(f"{k}: {getattr(obj, k)!r} -> {v!r}" for k, v in changes.items())
 
 
-# Sort order for entries within a project group: creates, then updates, then
-# deletes; ties broken by entity kind and then the rendered text.
-_OP_RANK = {"+": 0, "~": 1, "-": 2}
-_KIND_RANK = {"github": 0, "jenkins": 1, "dt": 2}
-
-
 def format_plan(plan: Plan) -> str:
-    """Render a plan as a human-readable, reviewable block, grouped by project.
-
-    Each project is a group: a header line (``+``/``-`` if the project itself is
-    created/deleted, otherwise unmarked) followed by its indented entries, with a
-    blank line between groups. Entries omit their owning project since the header
-    carries it — except an update that moves a workload between projects, which
-    shows the change inline via its ``ef_project_id`` detail.
-    """
+    """Render a plan as a human-readable, reviewable block."""
     if plan.is_empty():
         return "Plan: no changes — database already matches the file."
-
     n_create = len(plan.ef_create) + len(plan.creates)
     n_update = len(plan.updates)
     n_delete = len(plan.ef_delete) + len(plan.deletes)
     header = f"Plan: {n_create} to create, {n_update} to update, {n_delete} to delete"
-
-    created, deleted = set(plan.ef_create), set(plan.ef_delete)
-    by_project: dict[str, list[Change]] = {}
-    for change in plan.changes:
-        by_project.setdefault(change.project, []).append(change)
-
-    blocks: list[str] = []
-    for project in sorted(created | deleted | by_project.keys()):
-        marker = "+" if project in created else "-" if project in deleted else " "
-        lines = [f"{marker} project {project}"]
-        for change in sorted(
-            by_project.get(project, []),
-            key=lambda c: (_OP_RANK[c.op], _KIND_RANK[c.kind], c.body),
-        ):
-            lines.append(f"    {change.op} {change.body}")
-        blocks.append("\n".join(lines))
-
-    return "\n".join([header, "", "\n\n".join(blocks)])
+    return "\n".join([header, *plan.lines])
 
 
 def apply_plan(session: Session, plan: Plan) -> None:
