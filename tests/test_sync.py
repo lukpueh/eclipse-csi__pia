@@ -15,8 +15,8 @@ from pia.models import (
     JenkinsWorkload,
 )
 from pia.sync import (
+    DB,
     DT_PENDING_UUID,
-    Desired,
     DtProjectSpec,
     ProjectsFile,
     ProjectSpec,
@@ -135,8 +135,8 @@ def test_validate_rejects_unknown_field(tmp_path):
 
 
 def test_compute_plan_creates_on_empty_db(session):
-    desired = Desired(
-        ef_ids={"eclipse-foo"},
+    desired = DB(
+        ef={"eclipse-foo": EclipseFoundationProject(id="eclipse-foo")},
         github={
             ("eclipse-foo", "repo"): GitHubWorkload(
                 ef_project_id="eclipse-foo",
@@ -157,7 +157,7 @@ def test_compute_plan_creates_on_empty_db(session):
         },
     )
     plan = compute_plan(session, desired)
-    assert plan.ef_create == ["eclipse-foo"]
+    assert [p.id for p in plan.ef_create] == ["eclipse-foo"]
     assert len(plan.creates) == 3
     assert not plan.deletes
     assert not plan.ef_delete
@@ -193,8 +193,8 @@ def test_compute_plan_update_is_delete_plus_create(seed_db):
 def test_compute_plan_deletes_removed(seed_db):
     session = seed_db
     # Keep only eclipse-test's GitHub workload + DT project; drop everything else.
-    desired = Desired(
-        ef_ids={"eclipse-test"},
+    desired = DB(
+        ef={"eclipse-test": EclipseFoundationProject(id="eclipse-test")},
         github={
             ("eclipse-test", "repo"): GitHubWorkload(
                 ef_project_id="eclipse-test",
@@ -210,7 +210,7 @@ def test_compute_plan_deletes_removed(seed_db):
         },
     )
     plan = compute_plan(session, desired)
-    assert plan.ef_delete == ["eclipse-other"]
+    assert [p.id for p in plan.ef_delete] == ["eclipse-other"]
     deleted_kinds = sorted(type(o).__name__ for o in plan.deletes)
     assert deleted_kinds == ["DependencyTrackProject", "JenkinsWorkload"]
     assert not plan.creates
@@ -222,8 +222,8 @@ def test_compute_plan_deletes_removed(seed_db):
 
 
 def test_apply_creates_then_idempotent(session):
-    desired = Desired(
-        ef_ids={"p"},
+    desired = DB(
+        ef={"p": EclipseFoundationProject(id="p")},
         github={
             ("o", "r"): GitHubWorkload(
                 ef_project_id="p", repo_owner="o", repo_name="r", repo_owner_id="1"
@@ -261,8 +261,8 @@ def test_apply_update_replaces_row(seed_db):
 def test_apply_deletes_children_before_project(seed_db):
     session = seed_db
     # Reconcile to a file that no longer contains eclipse-other at all.
-    desired = Desired(
-        ef_ids={"eclipse-test"},
+    desired = DB(
+        ef={"eclipse-test": EclipseFoundationProject(id="eclipse-test")},
         github={
             ("eclipse-test", "repo"): GitHubWorkload(
                 ef_project_id="eclipse-test",
@@ -289,10 +289,13 @@ def test_apply_deletes_children_before_project(seed_db):
     assert session.query(GitHubWorkload).count() == 1
 
 
-def _desired_matching_seed() -> Desired:
-    """A Desired that exactly mirrors the `seed_db` fixture contents."""
-    return Desired(
-        ef_ids={"eclipse-test", "eclipse-other"},
+def _desired_matching_seed() -> DB:
+    """A DB that exactly mirrors the `seed_db` fixture contents."""
+    return DB(
+        ef={
+            i: EclipseFoundationProject(id=i)
+            for i in ("eclipse-test", "eclipse-other")
+        },
         github={
             ("eclipse-test", "repo"): GitHubWorkload(
                 ef_project_id="eclipse-test",

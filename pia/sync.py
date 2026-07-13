@@ -287,24 +287,30 @@ def resolve_dt_child_uuid(
 
 
 # --------------------------------------------------------------------------- #
-# Desired state
+# DB state
 # --------------------------------------------------------------------------- #
 
-# The desired state is expressed directly as transient (session-less) ORM
-# instances from models.py, carrying only the resolved business fields from the
-# curated input file and subsequent DT and GH API lookups. Their autoincrement
-# PKs and polymorphic `type` discriminator are populated by SQLAlchemy on flush,
-# once the objects that survive the diff are added to a session in apply_plan;
-# until then they are plain in-memory values diffed against the current DB rows.
-# Diffing is keyed on business keys (see Desired), never on ORM identity, so the
-# transient objects need no PK.
+# Both the desired and the current state are expressed as ORM instances from
+# models.py, held in a DB snapshot keyed by business key. The desired instances
+# are transient (session-less): they carry only the resolved business fields from
+# the curated file and DT/GH lookups, and their autoincrement PKs and polymorphic
+# `type` discriminator are populated by SQLAlchemy on flush, once the objects
+# that survive the diff are added to a session in apply_plan. The current
+# instances are the session-attached rows loaded from the DB. Diffing is keyed on
+# business keys (see DB), never on ORM identity, so the transient objects need no
+# PK.
 
 
 @dataclass
-class Desired:
-    """Fully resolved target state, keyed for diffing."""
+class DB:
+    """A snapshot of the DB entities, keyed by business key for diffing.
 
-    ef_ids: set[str] = field(default_factory=set)
+    Used for both the desired state (built from the curated file by
+    build_desired) and the current state (loaded from the DB by _load_current).
+    """
+
+    # ef_project_id -> EclipseFoundationProject
+    ef: dict[str, EclipseFoundationProject] = field(default_factory=dict)
     # (repo_owner, repo_name) -> GitHubWorkload
     github: dict[tuple[str, str], GitHubWorkload] = field(default_factory=dict)
     # issuer -> JenkinsWorkload
@@ -320,7 +326,7 @@ def build_desired(
     github_token: str | None = None,
     create_dt_projects: bool = False,
     dry_run: bool = False,
-) -> Desired:
+) -> DB:
     """Resolve the curated file into a fully-populated desired state.
 
     Performs the external lookups (GitHub owner ids, DependencyTrack child UUIDs).
@@ -328,12 +334,12 @@ def build_desired(
     When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
     are created (or, under ``dry_run``, reported as pending without being created).
     """
-    desired = Desired()
+    desired = DB()
     owner_id_cache: dict[str, str] = {}
     dt_root_cache: dict[str, dict[str, Any]] = {}
 
     for project in pf.projects:
-        desired.ef_ids.add(project.id)
+        desired.ef[project.id] = EclipseFoundationProject(id=project.id)
 
         for url in project.workloads:
             kind, a, b = classify_workload_url(url)
@@ -394,8 +400,8 @@ class Plan:
     # via ef_project_id, so they must be deleted before their parents, and
     # vice-versa parents must be created before their children.
 
-    ef_create: list[str] = field(default_factory=list)
-    ef_delete: list[str] = field(default_factory=list)
+    ef_create: list[EclipseFoundationProject] = field(default_factory=list)
+    ef_delete: list[EclipseFoundationProject] = field(default_factory=list)
     creates: list[Any] = field(default_factory=list)
     deletes: list[Any] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)  # human-readable, in plan order
@@ -406,21 +412,27 @@ class Plan:
         )
 
 
-def _load_current(session: Session):
-    ef = {p.id for p in session.execute(select(EclipseFoundationProject)).scalars()}
-    gh = {
-        (w.repo_owner, w.repo_name): w
-        for w in session.execute(select(GitHubWorkload)).scalars()
-    }
-    jk = {w.issuer: w for w in session.execute(select(JenkinsWorkload)).scalars()}
-    dt = {
-        (d.ef_project_id, d.name): d
-        for d in session.execute(select(DependencyTrackProject)).scalars()
-    }
-    return ef, gh, jk, dt
+def _load_current(session: Session) -> DB:
+    return DB(
+        ef={
+            p.id: p
+            for p in session.execute(select(EclipseFoundationProject)).scalars()
+        },
+        github={
+            (w.repo_owner, w.repo_name): w
+            for w in session.execute(select(GitHubWorkload)).scalars()
+        },
+        jenkins={
+            w.issuer: w for w in session.execute(select(JenkinsWorkload)).scalars()
+        },
+        dt={
+            (d.ef_project_id, d.name): d
+            for d in session.execute(select(DependencyTrackProject)).scalars()
+        },
+    )
 
 
-def compute_plan(session: Session, desired: Desired) -> Plan:
+def compute_plan(session: Session, desired: DB) -> Plan:
     """Diff the desired state against the current DB state. No writes.
 
     A workload / DT project whose non-key fields changed is emitted as a delete
@@ -428,20 +440,24 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
     skipped. The DependencyTrack "pending" sentinel counts as unchanged, so a
     dry-run never rewrites an existing DT project.
     """
-    ef_cur, gh_cur, jk_cur, dt_cur = _load_current(session)
+    current = _load_current(session)
     plan = Plan()
 
     # Eclipse Foundation projects (create/delete only; the id is the whole row).
-    for ef_id in sorted(desired.ef_ids - ef_cur):
-        plan.ef_create.append(ef_id)
-        plan.lines.append(f"+ {EclipseFoundationProject(id=ef_id)!r}")
-    for ef_id in sorted(ef_cur - desired.ef_ids):
-        plan.ef_delete.append(ef_id)
-        plan.lines.append(f"- {EclipseFoundationProject(id=ef_id)!r}")
+    # Creates carry the transient desired row; deletes carry the attached current
+    # one, so apply_plan can add/delete them without re-fetching.
+    for ef_id in sorted(desired.ef.keys() - current.ef.keys()):
+        obj = desired.ef[ef_id]
+        plan.ef_create.append(obj)
+        plan.lines.append(f"+ {obj!r}")
+    for ef_id in sorted(current.ef.keys() - desired.ef.keys()):
+        obj = current.ef[ef_id]
+        plan.ef_delete.append(obj)
+        plan.lines.append(f"- {obj!r}")
 
     _diff_child(
         plan,
-        gh_cur,
+        current.github,
         desired.github,
         changed=lambda c, d: (
             c.ef_project_id != d.ef_project_id or c.repo_owner_id != d.repo_owner_id
@@ -449,13 +465,13 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
     )
     _diff_child(
         plan,
-        jk_cur,
+        current.jenkins,
         desired.jenkins,
         changed=lambda c, d: c.ef_project_id != d.ef_project_id,
     )
     _diff_child(
         plan,
-        dt_cur,
+        current.dt,
         desired.dt,
         # The pending sentinel is not a real UUID, so treat it as "unchanged"
         # against an existing row — a dry-run must not rewrite it.
@@ -511,15 +527,13 @@ def apply_plan(session: Session, plan: Plan) -> None:
     # 1. delete workload / DT child rows (ORM delete clears the joined base row too)
     for obj in plan.deletes:
         session.delete(obj)
-    # 2. delete now-unreferenced Eclipse Foundation projects
-    for ef_id in plan.ef_delete:
-        obj = session.get(EclipseFoundationProject, ef_id)
-        if obj is not None:
-            session.delete(obj)
+    # 2. delete now-unreferenced Eclipse Foundation projects (attached current rows)
+    for obj in plan.ef_delete:
+        session.delete(obj)
     session.flush()
     # 3. create Eclipse Foundation projects before any child references them
-    for ef_id in plan.ef_create:
-        session.add(EclipseFoundationProject(id=ef_id))
+    for obj in plan.ef_create:
+        session.add(obj)
     session.flush()
     # 4. create child rows (old rows already deleted above, so keys are free)
     for obj in plan.creates:
