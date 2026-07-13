@@ -419,7 +419,7 @@ def test_sync_dry_run_writes_nothing(runner, tmp_path, session_factory, patch_cl
         """,
     )
     result = runner.invoke(
-        cli_module.cli, ["sync", f, "--dt-url", "https://dt", "--dry-run"]
+        cli_module.cli, ["sync", f, "--dt-url", "https://dt", "--db-dry-run"]
     )
     assert result.exit_code == 0, result.output
     assert "Plan:" in result.output
@@ -431,7 +431,7 @@ def test_sync_dry_run_writes_nothing(runner, tmp_path, session_factory, patch_cl
 def test_sync_dry_run_still_creates_dt_projects(
     runner, tmp_path, session_factory, monkeypatch
 ):
-    # --dry-run is scoped to the PIA database: with --create-dt-projects, missing
+    # --db-dry-run is scoped to the PIA database: with --create-dt-projects, missing
     # DependencyTrack projects are still provisioned, but no DB rows are written.
     # (patch_cli is intentionally not used here: it stubs out resolve_dt_child_uuid,
     # which is exactly the DT-creation path under test.)
@@ -462,10 +462,10 @@ def test_sync_dry_run_still_creates_dt_projects(
     )
     result = runner.invoke(
         cli_module.cli,
-        ["sync", f, "--dt-url", "https://dt", "--dry-run", "--create-dt-projects"],
+        ["sync", f, "--dt-url", "https://dt", "--db-dry-run", "--create-dt-projects"],
     )
     assert result.exit_code == 0, result.output
-    # DT projects were created despite --dry-run ...
+    # DT projects were created despite --db-dry-run ...
     assert puts == ["Eclipse Foo", "foo-server"]
     # ... but nothing was written to the PIA database.
     with session_factory() as s:

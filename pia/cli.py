@@ -10,7 +10,7 @@ Usage Example
     PIA_DATABASE_URL=postgresql://user:secret@localhost:5432/pia \
     PIA_DEPENDENCY_TRACK_API_KEY=<API key with VIEW_PORTFOLIO permission> \
     PIA_GITHUB_TOKEN=<optional token with public read perission to lift the anonymous rate limit> \
-        uv run pia sync projects.yaml --dt-url https://sbom.eclipse.org --dry-run
+        uv run pia sync projects.yaml --dt-url https://sbom.eclipse.org --db-dry-run
 
 """
 
@@ -55,7 +55,7 @@ def _make_session() -> Session:
     "/api/v1/bom upload URL.",
 )
 @click.option(
-    "--dry-run",
+    "--db-dry-run",
     is_flag=True,
     help="Show the plan without writing to the PIA database. Scoped to the "
     "database only: with --create-dt-projects, missing DependencyTrack projects "
@@ -77,12 +77,12 @@ def _make_session() -> Session:
     help="Create missing parent/child projects on DependencyTrack instead of "
     "failing when they do not exist; performs no deletion on DependencyTrack; "
     "requires a DT API key with PORTFOLIO_MANAGEMENT permission. Applies even "
-    "under --dry-run.",
+    "under --db-dry-run.",
 )
 def sync(
     file: str,
     dt_url: str | None,
-    dry_run: bool,
+    db_dry_run: bool,
     check: bool,
     allow_db_deletions: bool,
     create_dt_projects: bool,
@@ -90,8 +90,8 @@ def sync(
     """Reconcile all authorizations from a curated FILE into the database.
 
     Computes the difference between the file (the source of truth) and the
-    current database state, prints the plan, and — unless --dry-run — applies it,
-    creating, updating and deleting rows to match the file.
+    current database state, prints the plan, and — unless --db-dry-run — applies
+    it, creating, updating and deleting rows to match the file.
 
     Requires PIA_DATABASE_URL, --dt-url, and PIA_DEPENDENCY_TRACK_API_KEY (with
     VIEW_PORTFOLIO permission). PIA_GITHUB_TOKEN is optional and only lifts the
@@ -124,7 +124,7 @@ def sync(
         plan = compute_plan(session, desired)
         click.echo(format_plan(plan))
 
-        if dry_run or plan.is_empty():
+        if db_dry_run or plan.is_empty():
             session.rollback()
             return
 
@@ -132,7 +132,7 @@ def sync(
             session.rollback()
             raise click.ClickException(
                 "Plan contains deletions; re-run with --allow-db-deletions to "
-                "apply (or --dry-run to preview)."
+                "apply (or --db-dry-run to preview)."
             )
 
         apply_plan(session, plan)

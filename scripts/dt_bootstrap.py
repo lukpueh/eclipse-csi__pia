@@ -178,7 +178,7 @@ def main() -> None:
     print("  export PIA_DEPENDENCY_TRACK_API_KEY=$(cat .dt-api-key)")
     print(
         f"  uv run pia sync projects.local.yaml --dt-url {DT_URL} "
-        "--create-dt-projects --dry-run\n"
+        "--create-dt-projects --db-dry-run\n"
     )
 
 

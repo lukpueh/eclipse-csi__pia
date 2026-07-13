@@ -211,7 +211,7 @@ def resolve_dt_child_uuid(
     reuses the same DT root across many mappings issues one request per root.
 
     When ``create`` is set, a missing root or child project is created rather than
-    raising; this happens even under ``pia sync --dry-run``, which scopes to the
+    raising; this happens even under ``pia sync --db-dry-run``, which scopes to the
     PIA database only (DependencyTrack projects are a prerequisite the sync
     provisions eagerly). An *ambiguous* match (more than one) is always an error,
     even with ``create``.
@@ -298,7 +298,7 @@ def build_desired(
     Performs the external lookups (GitHub owner ids, DependencyTrack child UUIDs).
     ``dt_url`` and ``dt_api_key`` are required (the CLI validates their presence).
     When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
-    are created; this is independent of ``pia sync --dry-run``, which scopes only
+    are created; this is independent of ``pia sync --db-dry-run``, which scopes only
     to the PIA database.
     """
     desired = DB()
