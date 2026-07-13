@@ -4,9 +4,11 @@
 Seeds an in-memory SQLite DB with a "current" state, builds a "desired" state by
 hand (no network / DependencyTrack calls needed), then runs the real
 compute_plan + format_plan so the output is exactly what `pia sync` would print.
-Exercises every entry type — create/update/delete of Eclipse Foundation
-projects, GitHub, Jenkins and DependencyTrack — including a workload that moves
-between projects, the dry-run "(to-be-created)" sentinel, and the empty plan.
+Exercises every entry type across Eclipse Foundation projects, GitHub, Jenkins
+and DependencyTrack. A modification is expressed as a delete of the old row plus
+a create of the new one, so it shows as an adjacent -/+ pair; the demo also
+covers a workload moving between projects, the dry-run "(to-be-created)"
+sentinel, and the empty plan.
 
 Usage:
     uv run python scripts/plan_demo.py
@@ -87,7 +89,7 @@ def desired_target() -> Desired:
         # technology.legacy dropped -> delete; technology.bar added -> create.
         ef_ids={"technology.foo", "technology.bar"},
         github={
-            # unchanged key, owner_id 111 -> 222  => update
+            # unchanged key, owner_id 111 -> 222  => delete + create
             ("eclipse-foo", "website"): DesiredGitHub(
                 ef_project_id="technology.foo",
                 repo_owner="eclipse-foo",
@@ -103,7 +105,7 @@ def desired_target() -> Desired:
             ),
         },
         jenkins={
-            # same issuer, project foo -> bar  => update (moves between projects)
+            # same issuer, project foo -> bar  => delete + create (moves projects)
             "https://ci.eclipse.org/foo/oidc": DesiredJenkins(
                 ef_project_id="technology.bar",
                 issuer="https://ci.eclipse.org/foo/oidc",
@@ -115,7 +117,7 @@ def desired_target() -> Desired:
             ),
         },
         dt={
-            # parent_uuid uuid-old -> uuid-new  => update
+            # parent_uuid uuid-old -> uuid-new  => delete + create
             ("technology.foo", "scanner"): DesiredDt(
                 ef_project_id="technology.foo",
                 name="scanner",
@@ -146,7 +148,7 @@ def main() -> None:
     plan = compute_plan(session, desired_target())
 
     print("=" * 70)
-    print("Exemplary plan (create / update / delete across all entity types)")
+    print("Exemplary plan (create / delete; a modification is delete + create)")
     print("=" * 70)
     print(format_plan(plan))
 

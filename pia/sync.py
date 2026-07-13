@@ -397,30 +397,30 @@ def build_desired(
 
 @dataclass
 class Plan:
-    """A reconciliation plan: what to create, update, and delete."""
+    """A reconciliation plan: what to create and delete.
+
+    Modifying a workload or DT project is expressed as a delete of the current
+    row plus a create of the desired one (matched by business key), so there is
+    no separate update bucket. apply_plan performs all deletes before all
+    creates, which frees the old row's unique key before its replacement is
+    inserted.
+    """
 
     # Eclipse Foundation projects are kept in their own ef_create/ef_delete
-    # lists, separate from the creates/updates/deletes lists of child dt
-    # projects and workloads, to assure foreign-key ordering: child rows
-    # reference the parent via ef_project_id, so they must be deleted before
-    # their parents, and vice-versa parents must be created before their
-    # children. Note: There is no ef_update row, because their id is their
-    # whole identity, so they can only be created or deleted.
+    # lists, separate from the creates/deletes lists of child dt projects and
+    # workloads, to assure foreign-key ordering: child rows reference the parent
+    # via ef_project_id, so they must be deleted before their parents, and
+    # vice-versa parents must be created before their children.
 
     ef_create: list[str] = field(default_factory=list)
     ef_delete: list[str] = field(default_factory=list)
     creates: list[Any] = field(default_factory=list)
-    updates: list[tuple[Any, dict[str, Any]]] = field(default_factory=list)
     deletes: list[Any] = field(default_factory=list)
     lines: list[str] = field(default_factory=list)  # human-readable, in plan order
 
     def is_empty(self) -> bool:
         return not (
-            self.ef_create
-            or self.ef_delete
-            or self.creates
-            or self.updates
-            or self.deletes
+            self.ef_create or self.ef_delete or self.creates or self.deletes
         )
 
 
@@ -439,11 +439,17 @@ def _load_current(session: Session):
 
 
 def compute_plan(session: Session, desired: Desired) -> Plan:
-    """Diff the desired state against the current DB state. No writes."""
+    """Diff the desired state against the current DB state. No writes.
+
+    A workload / DT project whose non-key fields changed is emitted as a delete
+    of the current row plus a create of the desired one; unchanged rows are
+    skipped. The DependencyTrack "pending" sentinel counts as unchanged, so a
+    dry-run never rewrites an existing DT project.
+    """
     ef_cur, gh_cur, jk_cur, dt_cur = _load_current(session)
     plan = Plan()
 
-    # Eclipse Foundation projects
+    # Eclipse Foundation projects (create/delete only; the id is the whole row).
     for ef_id in sorted(desired.ef_ids - ef_cur):
         plan.ef_create.append(ef_id)
         plan.lines.append(f"+ project {ef_id}")
@@ -451,97 +457,85 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         plan.ef_delete.append(ef_id)
         plan.lines.append(f"- project {ef_id}")
 
-    # GitHub workloads (keyed by repo identity)
-    for gh_key in sorted(desired.github):
-        dg = desired.github[gh_key]
-        gh_row = gh_cur.get(gh_key)
-        gh_label = f"github {dg.repo_owner}/{dg.repo_name}"
-        if gh_row is None:
-            plan.creates.append(
-                GitHubWorkload(
-                    ef_project_id=dg.ef_project_id,
-                    repo_owner=dg.repo_owner,
-                    repo_name=dg.repo_name,
-                    repo_owner_id=dg.repo_owner_id,
-                )
-            )
-            plan.lines.append(f"+ {gh_label} (project {dg.ef_project_id})")
-        else:
-            gh_changes: dict[str, Any] = {}
-            if gh_row.ef_project_id != dg.ef_project_id:
-                gh_changes["ef_project_id"] = dg.ef_project_id
-            if gh_row.repo_owner_id != dg.repo_owner_id:
-                gh_changes["repo_owner_id"] = dg.repo_owner_id
-            if gh_changes:
-                plan.updates.append((gh_row, gh_changes))
-                plan.lines.append(f"~ {gh_label} ({_fmt_changes(gh_row, gh_changes)})")
-    for gh_key in sorted(gh_cur):
-        if gh_key not in desired.github:
-            gh_row = gh_cur[gh_key]
-            plan.deletes.append(gh_row)
-            plan.lines.append(
-                f"- github {gh_row.repo_owner}/{gh_row.repo_name} "
-                f"(project {gh_row.ef_project_id})"
-            )
-
-    # Jenkins workloads (keyed by issuer)
-    for issuer in sorted(desired.jenkins):
-        dj = desired.jenkins[issuer]
-        jk_row = jk_cur.get(issuer)
-        if jk_row is None:
-            plan.creates.append(
-                JenkinsWorkload(ef_project_id=dj.ef_project_id, issuer=dj.issuer)
-            )
-            plan.lines.append(f"+ jenkins {issuer} (project {dj.ef_project_id})")
-        elif jk_row.ef_project_id != dj.ef_project_id:
-            jk_changes: dict[str, Any] = {"ef_project_id": dj.ef_project_id}
-            plan.updates.append((jk_row, jk_changes))
-            plan.lines.append(
-                f"~ jenkins {issuer} ({_fmt_changes(jk_row, jk_changes)})"
-            )
-    for issuer in sorted(jk_cur):
-        if issuer not in desired.jenkins:
-            jk_row = jk_cur[issuer]
-            plan.deletes.append(jk_row)
-            plan.lines.append(f"- jenkins {issuer} (project {jk_row.ef_project_id})")
-
-    # DependencyTrack projects (keyed by (ef_project_id, name))
-    for dt_key in sorted(desired.dt):
-        dd = desired.dt[dt_key]
-        dt_row = dt_cur.get(dt_key)
-        dt_label = f"dt {dd.ef_project_id}/{dd.name}"
-        if dt_row is None:
-            plan.creates.append(
-                DependencyTrackProject(
-                    ef_project_id=dd.ef_project_id,
-                    name=dd.name,
-                    parent_uuid=dd.parent_uuid,
-                )
-            )
-            plan.lines.append(f"+ {dt_label} -> {dd.parent_uuid}")
-        else:
-            dt_changes: dict[str, Any] = {}
-            # Ignore the dry-run "pending creation" sentinel: it is not a real
-            # UUID, so it must not be recorded as a parent_uuid change.
-            if (
-                dd.parent_uuid != DT_PENDING_UUID
-                and dt_row.parent_uuid != dd.parent_uuid
-            ):
-                dt_changes["parent_uuid"] = dd.parent_uuid
-            if dt_changes:
-                plan.updates.append((dt_row, dt_changes))
-                plan.lines.append(f"~ {dt_label} ({_fmt_changes(dt_row, dt_changes)})")
-    for dt_key in sorted(dt_cur):
-        if dt_key not in desired.dt:
-            dt_row = dt_cur[dt_key]
-            plan.deletes.append(dt_row)
-            plan.lines.append(f"- dt {dt_row.ef_project_id}/{dt_row.name}")
-
+    _diff_child(
+        plan,
+        gh_cur,
+        desired.github,
+        changed=lambda c, d: (
+            c.ef_project_id != d.ef_project_id or c.repo_owner_id != d.repo_owner_id
+        ),
+        to_orm=lambda d: GitHubWorkload(
+            ef_project_id=d.ef_project_id,
+            repo_owner=d.repo_owner,
+            repo_name=d.repo_name,
+            repo_owner_id=d.repo_owner_id,
+        ),
+        line=_gh_line,
+    )
+    _diff_child(
+        plan,
+        jk_cur,
+        desired.jenkins,
+        changed=lambda c, d: c.ef_project_id != d.ef_project_id,
+        to_orm=lambda d: JenkinsWorkload(
+            ef_project_id=d.ef_project_id, issuer=d.issuer
+        ),
+        line=_jk_line,
+    )
+    _diff_child(
+        plan,
+        dt_cur,
+        desired.dt,
+        # The pending sentinel is not a real UUID, so treat it as "unchanged"
+        # against an existing row — a dry-run must not rewrite it.
+        changed=lambda c, d: (
+            d.parent_uuid != DT_PENDING_UUID and c.parent_uuid != d.parent_uuid
+        ),
+        to_orm=lambda d: DependencyTrackProject(
+            ef_project_id=d.ef_project_id, name=d.name, parent_uuid=d.parent_uuid
+        ),
+        line=_dt_line,
+    )
     return plan
 
 
-def _fmt_changes(obj: Any, changes: dict[str, Any]) -> str:
-    return ", ".join(f"{k}: {getattr(obj, k)!r} -> {v!r}" for k, v in changes.items())
+def _diff_child(plan, current, desired, *, changed, to_orm, line) -> None:
+    """Diff one child-entity map, recording deletes and creates on ``plan``.
+
+    ``current`` maps business key -> ORM row and ``desired`` maps the same key ->
+    Desired* value. A key present on only one side is a plain delete or create; a
+    key on both whose fields ``changed`` becomes a delete of the old row plus a
+    create of the new one. Entries are emitted in key order, delete before
+    create, so a modification reads as an adjacent -/+ pair.
+    """
+    for key in sorted(current.keys() | desired.keys()):
+        cur = current.get(key)
+        des = desired.get(key)
+        modified = cur is not None and des is not None and changed(cur, des)
+        if cur is not None and (des is None or modified):
+            plan.deletes.append(cur)
+            plan.lines.append(f"- {line(cur)}")
+        if des is not None and (cur is None or modified):
+            plan.creates.append(to_orm(des))
+            plan.lines.append(f"+ {line(des)}")
+
+
+# Line renderers, duck-typed over the matching ORM row and Desired* value (which
+# share attribute names) so a delete and its replacing create render alike. The
+# rendered fields include everything mutable, so a -/+ pair shows what changed.
+def _gh_line(x: Any) -> str:
+    return (
+        f"github {x.repo_owner}/{x.repo_name} "
+        f"(project {x.ef_project_id}, owner-id {x.repo_owner_id})"
+    )
+
+
+def _jk_line(x: Any) -> str:
+    return f"jenkins {x.issuer} (project {x.ef_project_id})"
+
+
+def _dt_line(x: Any) -> str:
+    return f"dt {x.ef_project_id}/{x.name} -> {x.parent_uuid}"
 
 
 def format_plan(plan: Plan) -> str:
@@ -549,9 +543,8 @@ def format_plan(plan: Plan) -> str:
     if plan.is_empty():
         return "Plan: no changes — database already matches the file."
     n_create = len(plan.ef_create) + len(plan.creates)
-    n_update = len(plan.updates)
     n_delete = len(plan.ef_delete) + len(plan.deletes)
-    header = f"Plan: {n_create} to create, {n_update} to update, {n_delete} to delete"
+    header = f"Plan: {n_create} to create, {n_delete} to delete"
     return "\n".join([header, *plan.lines])
 
 
@@ -560,7 +553,9 @@ def apply_plan(session: Session, plan: Plan) -> None:
 
     Order matters against the foreign keys (which have no ON DELETE CASCADE):
     delete child rows, then empty projects; create projects before their children.
-    Deleting before creating also frees unique keys when an entry moves.
+    Deleting (and flushing) before creating also frees unique keys, so a
+    modification expressed as delete+create of the same business key does not
+    collide with its own old row.
     """
     # 1. delete workload / DT child rows (ORM delete clears the joined base row too)
     for obj in plan.deletes:
@@ -575,11 +570,7 @@ def apply_plan(session: Session, plan: Plan) -> None:
     for ef_id in plan.ef_create:
         session.add(EclipseFoundationProject(id=ef_id))
     session.flush()
-    # 4. apply updates
-    for obj, changes in plan.updates:
-        for attr, value in changes.items():
-            setattr(obj, attr, value)
-    # 5. create child rows
+    # 4. create child rows (old rows already deleted above, so keys are free)
     for obj in plan.creates:
         session.add(obj)
     session.flush()

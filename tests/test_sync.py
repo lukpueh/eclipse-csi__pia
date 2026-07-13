@@ -155,7 +155,6 @@ def test_compute_plan_creates_on_empty_db(session):
     plan = compute_plan(session, desired)
     assert plan.ef_create == ["eclipse-foo"]
     assert len(plan.creates) == 3
-    assert not plan.updates
     assert not plan.deletes
     assert not plan.ef_delete
 
@@ -167,7 +166,7 @@ def test_compute_plan_noop_when_matching(seed_db):
     assert plan.is_empty()
 
 
-def test_compute_plan_update_owner_id(seed_db):
+def test_compute_plan_update_is_delete_plus_create(seed_db):
     session = seed_db
     desired = _desired_matching_seed()
     # Change the resolved owner id for the existing GitHub workload.
@@ -175,10 +174,13 @@ def test_compute_plan_update_owner_id(seed_db):
         "eclipse-test", "eclipse-test", "repo", "99"
     )
     plan = compute_plan(session, desired)
-    assert not plan.creates and not plan.deletes
-    assert len(plan.updates) == 1
-    _obj, changes = plan.updates[0]
-    assert changes == {"repo_owner_id": "99"}
+    # A modification is expressed as delete of the old row + create of the new.
+    assert not plan.ef_create and not plan.ef_delete
+    assert len(plan.deletes) == 1 and len(plan.creates) == 1
+    assert isinstance(plan.deletes[0], GitHubWorkload)
+    assert plan.deletes[0].repo_owner_id == "42"
+    assert isinstance(plan.creates[0], GitHubWorkload)
+    assert plan.creates[0].repo_owner_id == "99"
 
 
 def test_compute_plan_deletes_removed(seed_db):
@@ -201,7 +203,7 @@ def test_compute_plan_deletes_removed(seed_db):
     assert plan.ef_delete == ["eclipse-other"]
     deleted_kinds = sorted(type(o).__name__ for o in plan.deletes)
     assert deleted_kinds == ["DependencyTrackProject", "JenkinsWorkload"]
-    assert not plan.creates and not plan.updates
+    assert not plan.creates
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +223,22 @@ def test_apply_creates_then_idempotent(session):
     assert session.query(EclipseFoundationProject).count() == 1
     # Re-running against the now-populated DB is a no-op.
     assert compute_plan(session, desired).is_empty()
+
+
+def test_apply_update_replaces_row(seed_db):
+    # An update is delete+create of the same business key; applying it must not
+    # collide with the old row's unique key and must leave exactly one new row.
+    session = seed_db
+    desired = _desired_matching_seed()
+    desired.github[("eclipse-test", "repo")] = DesiredGitHub(
+        "eclipse-test", "eclipse-test", "repo", "99"
+    )
+    apply_plan(session, compute_plan(session, desired))
+    session.commit()
+
+    rows = session.query(GitHubWorkload).all()
+    assert len(rows) == 1
+    assert rows[0].repo_owner_id == "99"
 
 
 def test_apply_deletes_children_before_project(seed_db):
