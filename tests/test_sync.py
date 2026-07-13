@@ -134,12 +134,13 @@ def test_validate_rejects_unknown_field(tmp_path):
 
 
 def _db(*, ef=(), github=(), jenkins=(), dt=()) -> DB:
-    """Build a DB snapshot from object lists, keyed by diff_key like production."""
+    """Build a DB snapshot from object lists, keyed via _diff_key like production."""
+    key = sync_module._diff_key
     return DB(
-        ef={o.diff_key: o for o in ef},
-        github={o.diff_key: o for o in github},
-        jenkins={o.diff_key: o for o in jenkins},
-        dt={o.diff_key: o for o in dt},
+        ef={key(o): o for o in ef},
+        github={key(o): o for o in github},
+        jenkins={key(o): o for o in jenkins},
+        dt={key(o): o for o in dt},
     )
 
 
@@ -183,14 +184,14 @@ def test_compute_plan_update_is_delete_plus_create(seed_db):
     session = seed_db
     desired = _desired_matching_seed()
     # Change the resolved owner id for the existing GitHub workload (seed has
-    # exactly one), so its diff_key differs from the current row's.
+    # exactly one), so its diff key differs from the current row's.
     gh = GitHubWorkload(
         ef_project_id="eclipse-test",
         repo_owner="eclipse-test",
         repo_name="repo",
         repo_owner_id="99",
     )
-    desired.github = {gh.diff_key: gh}
+    desired.github = {sync_module._diff_key(gh): gh}
     plan = compute_plan(session, desired)
     # A modification is expressed as delete of the old row + create of the new.
     assert not plan.ef_create and not plan.ef_delete
@@ -261,7 +262,7 @@ def test_apply_update_replaces_row(seed_db):
         repo_name="repo",
         repo_owner_id="99",
     )
-    desired.github = {gh.diff_key: gh}
+    desired.github = {sync_module._diff_key(gh): gh}
     apply_plan(session, compute_plan(session, desired))
     session.commit()
 

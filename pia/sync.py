@@ -263,18 +263,18 @@ def resolve_dt_child_uuid(
 # survive the diff are added to a session in apply_plan. The current instances
 # are the session-attached rows loaded from the DB.
 #
-# Each dict is keyed by the row's `diff_key` — the tuple of all its business
+# Each dict is keyed by the row's _diff_key — the tuple of all its business
 # columns. Keying on the full column set (rather than a bare business key plus a
 # field-by-field comparison) means the diff is a plain set difference over keys:
 # an unchanged row has the same key on both sides and cancels, while a modified
 # row has a different key on each side and so shows up as a delete of the old key
-# plus a create of the new one (see _diff). ORM identity is never used, so the
-# transient objects need no PK.
+# plus a create of the new one (see compute_plan). ORM identity is never used, so
+# the transient objects need no PK.
 
 
 @dataclass
 class DB:
-    """A snapshot of the DB entities, keyed by ``diff_key`` for set-diffing.
+    """A snapshot of the DB entities, keyed by _diff_key for set-diffing.
 
     Used for both the desired state (built from the curated file by
     build_desired) and the current state (loaded from the DB by _load_current).
@@ -284,6 +284,24 @@ class DB:
     github: dict[tuple[str, ...], GitHubWorkload] = field(default_factory=dict)
     jenkins: dict[tuple[str, ...], JenkinsWorkload] = field(default_factory=dict)
     dt: dict[tuple[str, ...], DependencyTrackProject] = field(default_factory=dict)
+
+
+def _diff_key(obj: Any) -> tuple[str, ...]:
+    """Return the tuple of ``obj``'s business columns used to key DB snapshots.
+
+    Keying on the full column set is what lets compute_plan diff by plain set
+    difference (see the module comment above). build_desired and _load_current
+    both key through here so the two sides of the diff can never drift.
+    """
+    if isinstance(obj, GitHubWorkload):
+        return (obj.ef_project_id, obj.repo_owner, obj.repo_name, obj.repo_owner_id)
+    if isinstance(obj, JenkinsWorkload):
+        return (obj.ef_project_id, obj.issuer)
+    if isinstance(obj, DependencyTrackProject):
+        return (obj.ef_project_id, obj.name, obj.parent_uuid)
+    if isinstance(obj, EclipseFoundationProject):
+        return (obj.id,)
+    raise TypeError(f"no diff key for {type(obj).__name__}")
 
 
 def build_desired(
@@ -307,7 +325,7 @@ def build_desired(
 
     for project in pf.projects:
         ef = EclipseFoundationProject(id=project.id)
-        desired.ef[ef.diff_key] = ef
+        desired.ef[_diff_key(ef)] = ef
 
         for url in project.workloads:
             kind, a, b = classify_workload_url(url)
@@ -321,11 +339,11 @@ def build_desired(
                     repo_name=repo,
                     repo_owner_id=owner_id_cache[owner],
                 )
-                desired.github[gh.diff_key] = gh
+                desired.github[_diff_key(gh)] = gh
             else:
                 issuer = a
                 jk = JenkinsWorkload(ef_project_id=project.id, issuer=issuer)
-                desired.jenkins[jk.diff_key] = jk
+                desired.jenkins[_diff_key(jk)] = jk
 
         for dt in project.dependency_track:
             child_uuid = resolve_dt_child_uuid(
@@ -341,7 +359,7 @@ def build_desired(
                 name=dt.project,
                 parent_uuid=child_uuid,
             )
-            desired.dt[dtp.diff_key] = dtp
+            desired.dt[_diff_key(dtp)] = dtp
 
     return desired
 
@@ -380,17 +398,17 @@ class Plan:
 def _load_current(session: Session) -> DB:
     return DB(
         ef={
-            p.diff_key: p
+            _diff_key(p): p
             for p in session.execute(select(EclipseFoundationProject)).scalars()
         },
         github={
-            w.diff_key: w for w in session.execute(select(GitHubWorkload)).scalars()
+            _diff_key(w): w for w in session.execute(select(GitHubWorkload)).scalars()
         },
         jenkins={
-            w.diff_key: w for w in session.execute(select(JenkinsWorkload)).scalars()
+            _diff_key(w): w for w in session.execute(select(JenkinsWorkload)).scalars()
         },
         dt={
-            d.diff_key: d
+            _diff_key(d): d
             for d in session.execute(select(DependencyTrackProject)).scalars()
         },
     )
@@ -442,9 +460,9 @@ def format_plan(plan: Plan) -> str:
     deletes = [*plan.deletes, *plan.ef_delete]
     out = [f"Plan: {len(creates)} to create, {len(deletes)} to delete"]
     if creates:
-        out += ["", "Create:", "-"*7,  *(f"+ {obj!r}" for obj in creates)]
+        out += ["", "Create:", "-" * 7, *(f"+ {obj!r}" for obj in creates)]
     if deletes:
-        out += ["", "Delete:", "-"*7, *(f"- {obj!r}" for obj in deletes)]
+        out += ["", "Delete:", "-" * 7, *(f"- {obj!r}" for obj in deletes)]
     return "\n".join(out)
 
 

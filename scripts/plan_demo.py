@@ -29,6 +29,7 @@ from pia.models import (
 from pia.sync import (
     DB,
     Plan,
+    _diff_key,
     compute_plan,
     format_plan,
 )
@@ -82,7 +83,7 @@ def desired_target() -> DB:
     """The state the curated file wants (normally produced by build_desired)."""
 
     def by_key(objs):
-        return {o.diff_key: o for o in objs}
+        return {_diff_key(o): o for o in objs}
 
     return DB(
         # technology.legacy dropped -> delete; technology.bar added -> create.
