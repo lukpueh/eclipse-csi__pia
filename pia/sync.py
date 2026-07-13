@@ -386,7 +386,6 @@ class Plan:
     ef_delete: list[EclipseFoundationProject] = field(default_factory=list)
     creates: list[Any] = field(default_factory=list)
     deletes: list[Any] = field(default_factory=list)
-    lines: list[str] = field(default_factory=list)  # human-readable, in plan order
 
     def is_empty(self) -> bool:
         return not (self.ef_create or self.ef_delete or self.creates or self.deletes)
@@ -426,65 +425,50 @@ def compute_plan(session: Session, desired: DB) -> Plan:
     # honour foreign-key ordering (see Plan). Creates carry the transient desired
     # row, deletes the attached current one, so apply_plan neither reconstructs
     # nor re-fetches them.
-    _diff(
-        current.ef,
-        desired.ef,
-        creates=plan.ef_create,
-        deletes=plan.ef_delete,
-        lines=plan.lines,
-    )
-    _diff(
-        current.github,
-        desired.github,
-        creates=plan.creates,
-        deletes=plan.deletes,
-        lines=plan.lines,
-    )
-    _diff(
-        current.jenkins,
-        desired.jenkins,
-        creates=plan.creates,
-        deletes=plan.deletes,
-        lines=plan.lines,
-    )
-    _diff(
-        current.dt,
-        desired.dt,
-        creates=plan.creates,
-        deletes=plan.deletes,
-        lines=plan.lines,
-    )
+    plan.ef_create, plan.ef_delete = _diff(current.ef, desired.ef)
+    for cur, des in (
+        (current.github, desired.github),
+        (current.jenkins, desired.jenkins),
+        (current.dt, desired.dt),
+    ):
+        creates, deletes = _diff(cur, des)
+        plan.creates += creates
+        plan.deletes += deletes
     return plan
 
 
-def _diff(current, desired, *, creates, deletes, lines) -> None:
-    """Set-diff two diff_key-keyed maps, appending rows to the plan buckets.
+def _diff(current: dict, desired: dict) -> tuple[list, list]:
+    """Set-diff two diff_key-keyed maps into (creates, deletes) object lists.
 
     ``current`` maps diff_key -> session-attached row (loaded from the DB) and
     ``desired`` maps diff_key -> transient row (built by build_desired). A key
-    only in ``current`` is a delete; a key only in ``desired`` is a create; a key
-    on both is unchanged (identical business columns) and skipped. Deletes are
-    appended before creates and each is rendered into ``lines`` via the row's
-    ``__repr__``.
+    only in ``desired`` is a create; a key only in ``current`` is a delete; a key
+    on both is unchanged (identical business columns) and skipped. A modified row
+    differs in diff_key on each side, so it appears in both lists. Each list is
+    sorted by diff_key.
     """
-    for key in sorted(current.keys() - desired.keys()):
-        obj = current[key]
-        deletes.append(obj)
-        lines.append(f"- {obj!r}")
-    for key in sorted(desired.keys() - current.keys()):
-        obj = desired[key]
-        creates.append(obj)
-        lines.append(f"+ {obj!r}")
+    creates = [desired[key] for key in sorted(desired.keys() - current.keys())]
+    deletes = [current[key] for key in sorted(current.keys() - desired.keys())]
+    return creates, deletes
 
 
 def format_plan(plan: Plan) -> str:
-    """Render a plan as a human-readable, reviewable block."""
+    """Render a plan as a human-readable, reviewable block.
+
+    Shows a create block then a delete block, each rendered from the rows'
+    ``__repr__``. Within a block, Eclipse Foundation projects lead on create and
+    trail on delete, mirroring apply_plan's foreign-key-safe ordering.
+    """
     if plan.is_empty():
         return "Plan: no changes — database already matches the file."
-    n_create = len(plan.ef_create) + len(plan.creates)
-    n_delete = len(plan.ef_delete) + len(plan.deletes)
-    header = f"Plan: {n_create} to create, {n_delete} to delete"
-    return "\n".join([header, *plan.lines])
+    creates = [*plan.ef_create, *plan.creates]
+    deletes = [*plan.deletes, *plan.ef_delete]
+    out = [f"Plan: {len(creates)} to create, {len(deletes)} to delete"]
+    if creates:
+        out += ["", "Create:", *(f"  + {obj!r}" for obj in creates)]
+    if deletes:
+        out += ["", "Delete:", *(f"  - {obj!r}" for obj in deletes)]
+    return "\n".join(out)
 
 
 def apply_plan(session: Session, plan: Plan) -> None:
