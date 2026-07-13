@@ -434,10 +434,10 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
     # Eclipse Foundation projects (create/delete only; the id is the whole row).
     for ef_id in sorted(desired.ef_ids - ef_cur):
         plan.ef_create.append(ef_id)
-        plan.lines.append(f"+ {_project_line(ef_id)}")
+        plan.lines.append(f"+ {EclipseFoundationProject(id=ef_id)!r}")
     for ef_id in sorted(ef_cur - desired.ef_ids):
         plan.ef_delete.append(ef_id)
-        plan.lines.append(f"- {_project_line(ef_id)}")
+        plan.lines.append(f"- {EclipseFoundationProject(id=ef_id)!r}")
 
     _diff_child(
         plan,
@@ -446,14 +446,12 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         changed=lambda c, d: (
             c.ef_project_id != d.ef_project_id or c.repo_owner_id != d.repo_owner_id
         ),
-        line=_gh_line,
     )
     _diff_child(
         plan,
         jk_cur,
         desired.jenkins,
         changed=lambda c, d: c.ef_project_id != d.ef_project_id,
-        line=_jk_line,
     )
     _diff_child(
         plan,
@@ -464,12 +462,11 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         changed=lambda c, d: (
             d.parent_uuid != DT_PENDING_UUID and c.parent_uuid != d.parent_uuid
         ),
-        line=_dt_line,
     )
     return plan
 
 
-def _diff_child(plan, current, desired, *, changed, line) -> None:
+def _diff_child(plan, current, desired, *, changed) -> None:
     """Diff one child-entity map, recording deletes and creates on ``plan``.
 
     Both ``current`` and ``desired`` map the same business key -> ORM row; the
@@ -478,7 +475,7 @@ def _diff_child(plan, current, desired, *, changed, line) -> None:
     plain delete or create; a key on both whose fields ``changed`` becomes a
     delete of the old row plus a create of the new one. Entries are emitted in
     key order, delete before create, so a modification reads as an adjacent -/+
-    pair.
+    pair. Plan lines use each ORM row's ``__repr__``.
     """
     for key in sorted(current.keys() | desired.keys()):
         cur = current.get(key)
@@ -486,29 +483,10 @@ def _diff_child(plan, current, desired, *, changed, line) -> None:
         modified = cur is not None and des is not None and changed(cur, des)
         if cur is not None and (des is None or modified):
             plan.deletes.append(cur)
-            plan.lines.append(f"- {line(cur)}")
+            plan.lines.append(f"- {cur!r}")
         if des is not None and (cur is None or modified):
             plan.creates.append(des)
-            plan.lines.append(f"+ {line(des)}")
-
-
-# Line renderers
-def _project_line(ef_id: str) -> str:
-    return f"Eclipse Project  ({ef_id})"
-
-
-def _gh_line(x: Any) -> str:
-    return (
-        f"Github Workload  (project: {x.ef_project_id}, repo: {x.repo_owner}/{x.repo_name}, owner id: {x.repo_owner_id})"
-    )
-
-
-def _jk_line(x: Any) -> str:
-    return f"Jenkins Workload (project: {x.ef_project_id}, issuer: {x.issuer})"
-
-
-def _dt_line(x: Any) -> str:
-    return f"DependencyTrack  (project: {x.ef_project_id}, name: {x.name}, parent id: {x.parent_uuid})"
+            plan.lines.append(f"+ {des!r}")
 
 
 def format_plan(plan: Plan) -> str:

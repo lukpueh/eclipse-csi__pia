@@ -46,6 +46,10 @@ class EclipseFoundationProject(Base):
     # Here the PK is the Eclipse project identifier itself.
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
+    # __repr__ doubles as the human-readable line in the `pia sync` plan output.
+    def __repr__(self) -> str:
+        return f"Eclipse Project  ({self.id})"
+
 
 class Workload(Base):
     """CI/CD entity authorized to upload SBOMs.
@@ -98,6 +102,12 @@ class GitHubWorkload(Workload):
         "polymorphic_identity": "github",
     }
 
+    def __repr__(self) -> str:
+        return (
+            f"Github Workload  (project: {self.ef_project_id}, "
+            f"repo: {self.repo_owner}/{self.repo_name}, owner id: {self.repo_owner_id})"
+        )
+
 
 class JenkinsWorkload(Workload):
     """Jenkins workload. Each instance has a distinct issuer URL."""
@@ -111,6 +121,9 @@ class JenkinsWorkload(Workload):
     __mapper_args__ = {
         "polymorphic_identity": "jenkins",
     }
+
+    def __repr__(self) -> str:
+        return f"Jenkins Workload (project: {self.ef_project_id}, issuer: {self.issuer})"
 
 
 class DependencyTrackProject(Base):
@@ -129,6 +142,12 @@ class DependencyTrackProject(Base):
     parent_uuid: Mapped[str] = mapped_column(String)
 
     __table_args__ = (UniqueConstraint("name", "parent_uuid"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"DependencyTrack  (project: {self.ef_project_id}, "
+            f"name: {self.name}, parent id: {self.parent_uuid})"
+        )
 
 
 def is_issuer_known(issuer: str) -> bool:
