@@ -425,31 +425,22 @@ def compute_plan(session: Session, desired: DB) -> Plan:
     # honour foreign-key ordering (see Plan). Creates carry the transient desired
     # row, deletes the attached current one, so apply_plan neither reconstructs
     # nor re-fetches them.
-    plan.ef_create, plan.ef_delete = _diff(current.ef, desired.ef)
+    plan.ef_create = [
+        desired.ef[k] for k in sorted(desired.ef.keys() - current.ef.keys())
+    ]
+    plan.ef_delete = [
+        current.ef[k] for k in sorted(current.ef.keys() - desired.ef.keys())
+    ]
+
     for cur, des in (
         (current.github, desired.github),
         (current.jenkins, desired.jenkins),
         (current.dt, desired.dt),
     ):
-        creates, deletes = _diff(cur, des)
-        plan.creates += creates
-        plan.deletes += deletes
+        plan.creates += [des[k] for k in sorted(des.keys() - cur.keys())]
+        plan.deletes += [cur[k] for k in sorted(cur.keys() - des.keys())]
+
     return plan
-
-
-def _diff(current: dict, desired: dict) -> tuple[list, list]:
-    """Set-diff two diff_key-keyed maps into (creates, deletes) object lists.
-
-    ``current`` maps diff_key -> session-attached row (loaded from the DB) and
-    ``desired`` maps diff_key -> transient row (built by build_desired). A key
-    only in ``desired`` is a create; a key only in ``current`` is a delete; a key
-    on both is unchanged (identical business columns) and skipped. A modified row
-    differs in diff_key on each side, so it appears in both lists. Each list is
-    sorted by diff_key.
-    """
-    creates = [desired[key] for key in sorted(desired.keys() - current.keys())]
-    deletes = [current[key] for key in sorted(current.keys() - desired.keys())]
-    return creates, deletes
 
 
 def format_plan(plan: Plan) -> str:
