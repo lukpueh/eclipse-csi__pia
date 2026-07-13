@@ -290,32 +290,14 @@ def resolve_dt_child_uuid(
 # Desired state
 # --------------------------------------------------------------------------- #
 
-# Below classes mirror the ORM models in models.py but deliberately omit db
-# concerns (sessions, autoincrement PKs, etc.). They carry only the resolved
-# fields from the curated input file and subsequent DT and GH API lookups. They
-# are used to compute a diff to the current state, and are converted into
-# actual ORM instances eventually.
-
-
-@dataclass(frozen=True)
-class DesiredGitHub:
-    ef_project_id: str
-    repo_owner: str
-    repo_name: str
-    repo_owner_id: str
-
-
-@dataclass(frozen=True)
-class DesiredJenkins:
-    ef_project_id: str
-    issuer: str
-
-
-@dataclass(frozen=True)
-class DesiredDt:
-    ef_project_id: str
-    name: str
-    parent_uuid: str
+# The desired state is expressed directly as transient (session-less) ORM
+# instances from models.py, carrying only the resolved business fields from the
+# curated input file and subsequent DT and GH API lookups. Their autoincrement
+# PKs and polymorphic `type` discriminator are populated by SQLAlchemy on flush,
+# once the objects that survive the diff are added to a session in apply_plan;
+# until then they are plain in-memory values diffed against the current DB rows.
+# Diffing is keyed on business keys (see Desired), never on ORM identity, so the
+# transient objects need no PK.
 
 
 @dataclass
@@ -323,12 +305,12 @@ class Desired:
     """Fully resolved target state, keyed for diffing."""
 
     ef_ids: set[str] = field(default_factory=set)
-    # (repo_owner, repo_name) -> DesiredGitHub
-    github: dict[tuple[str, str], DesiredGitHub] = field(default_factory=dict)
-    # issuer -> DesiredJenkins
-    jenkins: dict[str, DesiredJenkins] = field(default_factory=dict)
-    # (ef_project_id, name) -> DesiredDt
-    dt: dict[tuple[str, str], DesiredDt] = field(default_factory=dict)
+    # (repo_owner, repo_name) -> GitHubWorkload
+    github: dict[tuple[str, str], GitHubWorkload] = field(default_factory=dict)
+    # issuer -> JenkinsWorkload
+    jenkins: dict[str, JenkinsWorkload] = field(default_factory=dict)
+    # (ef_project_id, name) -> DependencyTrackProject
+    dt: dict[tuple[str, str], DependencyTrackProject] = field(default_factory=dict)
 
 
 def build_desired(
@@ -359,7 +341,7 @@ def build_desired(
                 owner, repo = a, b
                 if owner not in owner_id_cache:
                     owner_id_cache[owner] = fetch_github_owner_id(owner, github_token)
-                desired.github[(owner, repo)] = DesiredGitHub(
+                desired.github[(owner, repo)] = GitHubWorkload(
                     ef_project_id=project.id,
                     repo_owner=owner,
                     repo_name=repo,
@@ -367,7 +349,7 @@ def build_desired(
                 )
             else:
                 issuer = a
-                desired.jenkins[issuer] = DesiredJenkins(
+                desired.jenkins[issuer] = JenkinsWorkload(
                     ef_project_id=project.id, issuer=issuer
                 )
 
@@ -381,7 +363,7 @@ def build_desired(
                 create=create_dt_projects,
                 dry_run=dry_run,
             )
-            desired.dt[(project.id, dt.project)] = DesiredDt(
+            desired.dt[(project.id, dt.project)] = DependencyTrackProject(
                 ef_project_id=project.id,
                 name=dt.project,
                 parent_uuid=child_uuid,
@@ -464,12 +446,6 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         changed=lambda c, d: (
             c.ef_project_id != d.ef_project_id or c.repo_owner_id != d.repo_owner_id
         ),
-        to_orm=lambda d: GitHubWorkload(
-            ef_project_id=d.ef_project_id,
-            repo_owner=d.repo_owner,
-            repo_name=d.repo_name,
-            repo_owner_id=d.repo_owner_id,
-        ),
         line=_gh_line,
     )
     _diff_child(
@@ -477,9 +453,6 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         jk_cur,
         desired.jenkins,
         changed=lambda c, d: c.ef_project_id != d.ef_project_id,
-        to_orm=lambda d: JenkinsWorkload(
-            ef_project_id=d.ef_project_id, issuer=d.issuer
-        ),
         line=_jk_line,
     )
     _diff_child(
@@ -491,22 +464,21 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
         changed=lambda c, d: (
             d.parent_uuid != DT_PENDING_UUID and c.parent_uuid != d.parent_uuid
         ),
-        to_orm=lambda d: DependencyTrackProject(
-            ef_project_id=d.ef_project_id, name=d.name, parent_uuid=d.parent_uuid
-        ),
         line=_dt_line,
     )
     return plan
 
 
-def _diff_child(plan, current, desired, *, changed, to_orm, line) -> None:
+def _diff_child(plan, current, desired, *, changed, line) -> None:
     """Diff one child-entity map, recording deletes and creates on ``plan``.
 
-    ``current`` maps business key -> ORM row and ``desired`` maps the same key ->
-    Desired* value. A key present on only one side is a plain delete or create; a
-    key on both whose fields ``changed`` becomes a delete of the old row plus a
-    create of the new one. Entries are emitted in key order, delete before
-    create, so a modification reads as an adjacent -/+ pair.
+    Both ``current`` and ``desired`` map the same business key -> ORM row; the
+    current rows are session-attached (loaded from the DB) while the desired ones
+    are transient (built by build_desired). A key present on only one side is a
+    plain delete or create; a key on both whose fields ``changed`` becomes a
+    delete of the old row plus a create of the new one. Entries are emitted in
+    key order, delete before create, so a modification reads as an adjacent -/+
+    pair.
     """
     for key in sorted(current.keys() | desired.keys()):
         cur = current.get(key)
@@ -516,7 +488,7 @@ def _diff_child(plan, current, desired, *, changed, to_orm, line) -> None:
             plan.deletes.append(cur)
             plan.lines.append(f"- {line(cur)}")
         if des is not None and (cur is None or modified):
-            plan.creates.append(to_orm(des))
+            plan.creates.append(des)
             plan.lines.append(f"+ {line(des)}")
 
 

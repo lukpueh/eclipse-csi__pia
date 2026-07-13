@@ -17,9 +17,6 @@ from pia.models import (
 from pia.sync import (
     DT_PENDING_UUID,
     Desired,
-    DesiredDt,
-    DesiredGitHub,
-    DesiredJenkins,
     DtProjectSpec,
     ProjectsFile,
     ProjectSpec,
@@ -141,16 +138,23 @@ def test_compute_plan_creates_on_empty_db(session):
     desired = Desired(
         ef_ids={"eclipse-foo"},
         github={
-            ("eclipse-foo", "repo"): DesiredGitHub(
-                "eclipse-foo", "eclipse-foo", "repo", "7"
+            ("eclipse-foo", "repo"): GitHubWorkload(
+                ef_project_id="eclipse-foo",
+                repo_owner="eclipse-foo",
+                repo_name="repo",
+                repo_owner_id="7",
             )
         },
         jenkins={
-            "https://ci.eclipse.org/foo/oidc": DesiredJenkins(
-                "eclipse-foo", "https://ci.eclipse.org/foo/oidc"
+            "https://ci.eclipse.org/foo/oidc": JenkinsWorkload(
+                ef_project_id="eclipse-foo", issuer="https://ci.eclipse.org/foo/oidc"
             )
         },
-        dt={("eclipse-foo", "prod"): DesiredDt("eclipse-foo", "prod", "uuidX")},
+        dt={
+            ("eclipse-foo", "prod"): DependencyTrackProject(
+                ef_project_id="eclipse-foo", name="prod", parent_uuid="uuidX"
+            )
+        },
     )
     plan = compute_plan(session, desired)
     assert plan.ef_create == ["eclipse-foo"]
@@ -170,8 +174,11 @@ def test_compute_plan_update_is_delete_plus_create(seed_db):
     session = seed_db
     desired = _desired_matching_seed()
     # Change the resolved owner id for the existing GitHub workload.
-    desired.github[("eclipse-test", "repo")] = DesiredGitHub(
-        "eclipse-test", "eclipse-test", "repo", "99"
+    desired.github[("eclipse-test", "repo")] = GitHubWorkload(
+        ef_project_id="eclipse-test",
+        repo_owner="eclipse-test",
+        repo_name="repo",
+        repo_owner_id="99",
     )
     plan = compute_plan(session, desired)
     # A modification is expressed as delete of the old row + create of the new.
@@ -189,13 +196,16 @@ def test_compute_plan_deletes_removed(seed_db):
     desired = Desired(
         ef_ids={"eclipse-test"},
         github={
-            ("eclipse-test", "repo"): DesiredGitHub(
-                "eclipse-test", "eclipse-test", "repo", "42"
+            ("eclipse-test", "repo"): GitHubWorkload(
+                ef_project_id="eclipse-test",
+                repo_owner="eclipse-test",
+                repo_name="repo",
+                repo_owner_id="42",
             )
         },
         dt={
-            ("eclipse-test", "test-product"): DesiredDt(
-                "eclipse-test", "test-product", "uuid-1"
+            ("eclipse-test", "test-product"): DependencyTrackProject(
+                ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             )
         },
     )
@@ -214,7 +224,11 @@ def test_compute_plan_deletes_removed(seed_db):
 def test_apply_creates_then_idempotent(session):
     desired = Desired(
         ef_ids={"p"},
-        github={("o", "r"): DesiredGitHub("p", "o", "r", "1")},
+        github={
+            ("o", "r"): GitHubWorkload(
+                ef_project_id="p", repo_owner="o", repo_name="r", repo_owner_id="1"
+            )
+        },
     )
     apply_plan(session, compute_plan(session, desired))
     session.commit()
@@ -230,8 +244,11 @@ def test_apply_update_replaces_row(seed_db):
     # collide with the old row's unique key and must leave exactly one new row.
     session = seed_db
     desired = _desired_matching_seed()
-    desired.github[("eclipse-test", "repo")] = DesiredGitHub(
-        "eclipse-test", "eclipse-test", "repo", "99"
+    desired.github[("eclipse-test", "repo")] = GitHubWorkload(
+        ef_project_id="eclipse-test",
+        repo_owner="eclipse-test",
+        repo_name="repo",
+        repo_owner_id="99",
     )
     apply_plan(session, compute_plan(session, desired))
     session.commit()
@@ -247,13 +264,16 @@ def test_apply_deletes_children_before_project(seed_db):
     desired = Desired(
         ef_ids={"eclipse-test"},
         github={
-            ("eclipse-test", "repo"): DesiredGitHub(
-                "eclipse-test", "eclipse-test", "repo", "42"
+            ("eclipse-test", "repo"): GitHubWorkload(
+                ef_project_id="eclipse-test",
+                repo_owner="eclipse-test",
+                repo_name="repo",
+                repo_owner_id="42",
             )
         },
         dt={
-            ("eclipse-test", "test-product"): DesiredDt(
-                "eclipse-test", "test-product", "uuid-1"
+            ("eclipse-test", "test-product"): DependencyTrackProject(
+                ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             )
         },
     )
@@ -274,21 +294,25 @@ def _desired_matching_seed() -> Desired:
     return Desired(
         ef_ids={"eclipse-test", "eclipse-other"},
         github={
-            ("eclipse-test", "repo"): DesiredGitHub(
-                "eclipse-test", "eclipse-test", "repo", "42"
+            ("eclipse-test", "repo"): GitHubWorkload(
+                ef_project_id="eclipse-test",
+                repo_owner="eclipse-test",
+                repo_name="repo",
+                repo_owner_id="42",
             )
         },
         jenkins={
-            "https://ci.eclipse.org/eclipse-other/oidc": DesiredJenkins(
-                "eclipse-other", "https://ci.eclipse.org/eclipse-other/oidc"
+            "https://ci.eclipse.org/eclipse-other/oidc": JenkinsWorkload(
+                ef_project_id="eclipse-other",
+                issuer="https://ci.eclipse.org/eclipse-other/oidc",
             )
         },
         dt={
-            ("eclipse-test", "test-product"): DesiredDt(
-                "eclipse-test", "test-product", "uuid-1"
+            ("eclipse-test", "test-product"): DependencyTrackProject(
+                ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             ),
-            ("eclipse-other", "other-product"): DesiredDt(
-                "eclipse-other", "other-product", "uuid-2"
+            ("eclipse-other", "other-product"): DependencyTrackProject(
+                ef_project_id="eclipse-other", name="other-product", parent_uuid="uuid-2"
             ),
         },
     )
