@@ -442,9 +442,9 @@ def format_plan(plan: Plan) -> str:
     deletes = [*plan.deletes, *plan.ef_delete]
     out = [f"Plan: {len(creates)} to create, {len(deletes)} to delete"]
     if creates:
-        out += ["", "Create:", *(f"  + {obj!r}" for obj in creates)]
+        out += ["", "Create:", "-"*7,  *(f"+ {obj!r}" for obj in creates)]
     if deletes:
-        out += ["", "Delete:", *(f"  - {obj!r}" for obj in deletes)]
+        out += ["", "Delete:", "-"*7, *(f"- {obj!r}" for obj in deletes)]
     return "\n".join(out)
 
 
