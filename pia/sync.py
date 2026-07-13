@@ -452,10 +452,10 @@ def compute_plan(session: Session, desired: Desired) -> Plan:
     # Eclipse Foundation projects (create/delete only; the id is the whole row).
     for ef_id in sorted(desired.ef_ids - ef_cur):
         plan.ef_create.append(ef_id)
-        plan.lines.append(f"+ project {ef_id}")
+        plan.lines.append(f"+ {_project_line(ef_id)}")
     for ef_id in sorted(ef_cur - desired.ef_ids):
         plan.ef_delete.append(ef_id)
-        plan.lines.append(f"- project {ef_id}")
+        plan.lines.append(f"- {_project_line(ef_id)}")
 
     _diff_child(
         plan,
@@ -520,22 +520,23 @@ def _diff_child(plan, current, desired, *, changed, to_orm, line) -> None:
             plan.lines.append(f"+ {line(des)}")
 
 
-# Line renderers, duck-typed over the matching ORM row and Desired* value (which
-# share attribute names) so a delete and its replacing create render alike. The
-# rendered fields include everything mutable, so a -/+ pair shows what changed.
+# Line renderers
+def _project_line(ef_id: str) -> str:
+    return f"Eclipse Project  ({ef_id})"
+
+
 def _gh_line(x: Any) -> str:
     return (
-        f"github {x.repo_owner}/{x.repo_name} "
-        f"(project {x.ef_project_id}, owner-id {x.repo_owner_id})"
+        f"Github Workload  (project: {x.ef_project_id}, repo: {x.repo_owner}/{x.repo_name}, owner id: {x.repo_owner_id})"
     )
 
 
 def _jk_line(x: Any) -> str:
-    return f"jenkins {x.issuer} (project {x.ef_project_id})"
+    return f"Jenkins Workload (project: {x.ef_project_id}, issuer: {x.issuer})"
 
 
 def _dt_line(x: Any) -> str:
-    return f"dt {x.ef_project_id}/{x.name} -> {x.parent_uuid}"
+    return f"DependencyTrack  (project: {x.ef_project_id}, name: {x.name}, parent id: {x.parent_uuid})"
 
 
 def format_plan(plan: Plan) -> str:
