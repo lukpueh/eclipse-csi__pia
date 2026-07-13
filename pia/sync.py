@@ -41,10 +41,6 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-# Placeholder UUID used in the plan for a DependencyTrack project that --dry-run
-# reports as "would be created" (with --create-dt-projects) but does not create.
-DT_PENDING_UUID = "(to-be-created)"
-
 
 # --------------------------------------------------------------------------- #
 # Curated-file model
@@ -224,7 +220,6 @@ def resolve_dt_child_uuid(
     api_key: str,
     root_cache: dict[str, dict[str, Any]] | None = None,
     create: bool = False,
-    dry_run: bool = False,
 ) -> str:
     """Resolve the UUID of child ``project_name`` under root ``parent_name``.
 
@@ -232,15 +227,11 @@ def resolve_dt_child_uuid(
     reuses the same DT root across many mappings issues one request per root.
 
     When ``create`` is set, a missing root or child project is created rather than
-    raising — except under ``dry_run``, where nothing is created and the pending
-    creation is logged and reported via the ``DT_PENDING_UUID`` sentinel. An
-    *ambiguous* match (more than one) is always an error, even with ``create``.
+    raising; this happens even under ``pia sync --dry-run``, which scopes to the
+    PIA database only (DependencyTrack projects are a prerequisite the sync
+    provisions eagerly). An *ambiguous* match (more than one) is always an error,
+    even with ``create``.
     """
-    child_note = (
-        f"[dry-run] would create DependencyTrack project {project_name!r} "
-        f"under {parent_name!r}"
-    )
-
     # Resolve (or, with --create, provision) the root project, caching it so other
     # mappings that reuse this root neither re-query nor re-create it.
     parent = root_cache.get(parent_name) if root_cache is not None else None
@@ -249,23 +240,14 @@ def resolve_dt_child_uuid(
         match = _dt_pick_one(
             roots, f"root DependencyTrack project named {parent_name!r}", create
         )
-        if match is not None:
-            parent = match
-        elif dry_run:
-            logger.info(
-                f"[dry-run] would create DependencyTrack root project {parent_name!r}"
-            )
-            parent = {"uuid": None, "_pending": True}
-        else:
-            parent = _dt_create_project(dt_url, parent_name, api_key)
+        parent = (
+            match
+            if match is not None
+            else _dt_create_project(dt_url, parent_name, api_key)
+        )
         parent.setdefault("children", [])
         if root_cache is not None:
             root_cache[parent_name] = parent
-
-    # A pending root (dry-run) has no real UUID to parent a child lookup under.
-    if parent.get("_pending"):
-        logger.info(child_note)
-        return DT_PENDING_UUID
 
     # Resolve (or provision) the child under the resolved root.
     children = [c for c in parent["children"] if c.get("name") == project_name]
@@ -274,9 +256,6 @@ def resolve_dt_child_uuid(
     )
     if match is not None:
         return match["uuid"]
-    if dry_run:
-        logger.info(child_note)
-        return DT_PENDING_UUID
 
     child = _dt_create_project(
         dt_url, project_name, api_key, parent_uuid=parent["uuid"]
@@ -291,32 +270,34 @@ def resolve_dt_child_uuid(
 # --------------------------------------------------------------------------- #
 
 # Both the desired and the current state are expressed as ORM instances from
-# models.py, held in a DB snapshot keyed by business key. The desired instances
-# are transient (session-less): they carry only the resolved business fields from
-# the curated file and DT/GH lookups, and their autoincrement PKs and polymorphic
-# `type` discriminator are populated by SQLAlchemy on flush, once the objects
-# that survive the diff are added to a session in apply_plan. The current
-# instances are the session-attached rows loaded from the DB. Diffing is keyed on
-# business keys (see DB), never on ORM identity, so the transient objects need no
-# PK.
+# models.py, held in a DB snapshot. The desired instances are transient
+# (session-less): they carry only the resolved business fields from the curated
+# file and DT/GH lookups, and their autoincrement PKs and polymorphic `type`
+# discriminator are populated by SQLAlchemy on flush, once the objects that
+# survive the diff are added to a session in apply_plan. The current instances
+# are the session-attached rows loaded from the DB.
+#
+# Each dict is keyed by the row's `diff_key` — the tuple of all its business
+# columns. Keying on the full column set (rather than a bare business key plus a
+# field-by-field comparison) means the diff is a plain set difference over keys:
+# an unchanged row has the same key on both sides and cancels, while a modified
+# row has a different key on each side and so shows up as a delete of the old key
+# plus a create of the new one (see _diff). ORM identity is never used, so the
+# transient objects need no PK.
 
 
 @dataclass
 class DB:
-    """A snapshot of the DB entities, keyed by business key for diffing.
+    """A snapshot of the DB entities, keyed by ``diff_key`` for set-diffing.
 
     Used for both the desired state (built from the curated file by
     build_desired) and the current state (loaded from the DB by _load_current).
     """
 
-    # ef_project_id -> EclipseFoundationProject
-    ef: dict[str, EclipseFoundationProject] = field(default_factory=dict)
-    # (repo_owner, repo_name) -> GitHubWorkload
-    github: dict[tuple[str, str], GitHubWorkload] = field(default_factory=dict)
-    # issuer -> JenkinsWorkload
-    jenkins: dict[str, JenkinsWorkload] = field(default_factory=dict)
-    # (ef_project_id, name) -> DependencyTrackProject
-    dt: dict[tuple[str, str], DependencyTrackProject] = field(default_factory=dict)
+    ef: dict[tuple[str, ...], EclipseFoundationProject] = field(default_factory=dict)
+    github: dict[tuple[str, ...], GitHubWorkload] = field(default_factory=dict)
+    jenkins: dict[tuple[str, ...], JenkinsWorkload] = field(default_factory=dict)
+    dt: dict[tuple[str, ...], DependencyTrackProject] = field(default_factory=dict)
 
 
 def build_desired(
@@ -325,21 +306,22 @@ def build_desired(
     dt_api_key: str,
     github_token: str | None = None,
     create_dt_projects: bool = False,
-    dry_run: bool = False,
 ) -> DB:
     """Resolve the curated file into a fully-populated desired state.
 
     Performs the external lookups (GitHub owner ids, DependencyTrack child UUIDs).
     ``dt_url`` and ``dt_api_key`` are required (the CLI validates their presence).
     When ``create_dt_projects`` is set, missing DependencyTrack root/child projects
-    are created (or, under ``dry_run``, reported as pending without being created).
+    are created; this is independent of ``pia sync --dry-run``, which scopes only
+    to the PIA database.
     """
     desired = DB()
     owner_id_cache: dict[str, str] = {}
     dt_root_cache: dict[str, dict[str, Any]] = {}
 
     for project in pf.projects:
-        desired.ef[project.id] = EclipseFoundationProject(id=project.id)
+        ef = EclipseFoundationProject(id=project.id)
+        desired.ef[ef.diff_key] = ef
 
         for url in project.workloads:
             kind, a, b = classify_workload_url(url)
@@ -347,17 +329,17 @@ def build_desired(
                 owner, repo = a, b
                 if owner not in owner_id_cache:
                     owner_id_cache[owner] = fetch_github_owner_id(owner, github_token)
-                desired.github[(owner, repo)] = GitHubWorkload(
+                gh = GitHubWorkload(
                     ef_project_id=project.id,
                     repo_owner=owner,
                     repo_name=repo,
                     repo_owner_id=owner_id_cache[owner],
                 )
+                desired.github[gh.diff_key] = gh
             else:
                 issuer = a
-                desired.jenkins[issuer] = JenkinsWorkload(
-                    ef_project_id=project.id, issuer=issuer
-                )
+                jk = JenkinsWorkload(ef_project_id=project.id, issuer=issuer)
+                desired.jenkins[jk.diff_key] = jk
 
         for dt in project.dependency_track:
             child_uuid = resolve_dt_child_uuid(
@@ -367,13 +349,13 @@ def build_desired(
                 dt_api_key,
                 dt_root_cache,
                 create=create_dt_projects,
-                dry_run=dry_run,
             )
-            desired.dt[(project.id, dt.project)] = DependencyTrackProject(
+            dtp = DependencyTrackProject(
                 ef_project_id=project.id,
                 name=dt.project,
                 parent_uuid=child_uuid,
             )
+            desired.dt[dtp.diff_key] = dtp
 
     return desired
 
@@ -387,10 +369,10 @@ def build_desired(
 class Plan:
     """A reconciliation plan: what to create and delete.
 
-    Modifying a workload or DT project is expressed as a delete of the current
-    row plus a create of the desired one (matched by business key), so there is
-    no separate update bucket. apply_plan performs all deletes before all
-    creates, which frees the old row's unique key before its replacement is
+    Modifying a workload or DT project falls out of the diff as a delete of the
+    current row plus a create of the desired one (their diff_keys differ), so
+    there is no separate update bucket. apply_plan performs all deletes before
+    all creates, which frees the old row's unique key before its replacement is
     inserted.
     """
 
@@ -407,26 +389,23 @@ class Plan:
     lines: list[str] = field(default_factory=list)  # human-readable, in plan order
 
     def is_empty(self) -> bool:
-        return not (
-            self.ef_create or self.ef_delete or self.creates or self.deletes
-        )
+        return not (self.ef_create or self.ef_delete or self.creates or self.deletes)
 
 
 def _load_current(session: Session) -> DB:
     return DB(
         ef={
-            p.id: p
+            p.diff_key: p
             for p in session.execute(select(EclipseFoundationProject)).scalars()
         },
         github={
-            (w.repo_owner, w.repo_name): w
-            for w in session.execute(select(GitHubWorkload)).scalars()
+            w.diff_key: w for w in session.execute(select(GitHubWorkload)).scalars()
         },
         jenkins={
-            w.issuer: w for w in session.execute(select(JenkinsWorkload)).scalars()
+            w.diff_key: w for w in session.execute(select(JenkinsWorkload)).scalars()
         },
         dt={
-            (d.ef_project_id, d.name): d
+            d.diff_key: d
             for d in session.execute(select(DependencyTrackProject)).scalars()
         },
     )
@@ -435,74 +414,67 @@ def _load_current(session: Session) -> DB:
 def compute_plan(session: Session, desired: DB) -> Plan:
     """Diff the desired state against the current DB state. No writes.
 
-    A workload / DT project whose non-key fields changed is emitted as a delete
-    of the current row plus a create of the desired one; unchanged rows are
-    skipped. The DependencyTrack "pending" sentinel counts as unchanged, so a
-    dry-run never rewrites an existing DT project.
+    The diff is a set difference over each entity's diff_key: a key only in
+    desired is a create, a key only in current is a delete, and a row whose
+    business columns changed shows up as both (its diff_key differs on each
+    side), i.e. a delete of the old row plus a create of the new one.
     """
     current = _load_current(session)
     plan = Plan()
 
-    # Eclipse Foundation projects (create/delete only; the id is the whole row).
-    # Creates carry the transient desired row; deletes carry the attached current
-    # one, so apply_plan can add/delete them without re-fetching.
-    for ef_id in sorted(desired.ef.keys() - current.ef.keys()):
-        obj = desired.ef[ef_id]
-        plan.ef_create.append(obj)
-        plan.lines.append(f"+ {obj!r}")
-    for ef_id in sorted(current.ef.keys() - desired.ef.keys()):
-        obj = current.ef[ef_id]
-        plan.ef_delete.append(obj)
-        plan.lines.append(f"- {obj!r}")
-
-    _diff_child(
-        plan,
+    # Eclipse Foundation projects go in their own buckets so apply_plan can
+    # honour foreign-key ordering (see Plan). Creates carry the transient desired
+    # row, deletes the attached current one, so apply_plan neither reconstructs
+    # nor re-fetches them.
+    _diff(
+        current.ef,
+        desired.ef,
+        creates=plan.ef_create,
+        deletes=plan.ef_delete,
+        lines=plan.lines,
+    )
+    _diff(
         current.github,
         desired.github,
-        changed=lambda c, d: (
-            c.ef_project_id != d.ef_project_id or c.repo_owner_id != d.repo_owner_id
-        ),
+        creates=plan.creates,
+        deletes=plan.deletes,
+        lines=plan.lines,
     )
-    _diff_child(
-        plan,
+    _diff(
         current.jenkins,
         desired.jenkins,
-        changed=lambda c, d: c.ef_project_id != d.ef_project_id,
+        creates=plan.creates,
+        deletes=plan.deletes,
+        lines=plan.lines,
     )
-    _diff_child(
-        plan,
+    _diff(
         current.dt,
         desired.dt,
-        # The pending sentinel is not a real UUID, so treat it as "unchanged"
-        # against an existing row — a dry-run must not rewrite it.
-        changed=lambda c, d: (
-            d.parent_uuid != DT_PENDING_UUID and c.parent_uuid != d.parent_uuid
-        ),
+        creates=plan.creates,
+        deletes=plan.deletes,
+        lines=plan.lines,
     )
     return plan
 
 
-def _diff_child(plan, current, desired, *, changed) -> None:
-    """Diff one child-entity map, recording deletes and creates on ``plan``.
+def _diff(current, desired, *, creates, deletes, lines) -> None:
+    """Set-diff two diff_key-keyed maps, appending rows to the plan buckets.
 
-    Both ``current`` and ``desired`` map the same business key -> ORM row; the
-    current rows are session-attached (loaded from the DB) while the desired ones
-    are transient (built by build_desired). A key present on only one side is a
-    plain delete or create; a key on both whose fields ``changed`` becomes a
-    delete of the old row plus a create of the new one. Entries are emitted in
-    key order, delete before create, so a modification reads as an adjacent -/+
-    pair. Plan lines use each ORM row's ``__repr__``.
+    ``current`` maps diff_key -> session-attached row (loaded from the DB) and
+    ``desired`` maps diff_key -> transient row (built by build_desired). A key
+    only in ``current`` is a delete; a key only in ``desired`` is a create; a key
+    on both is unchanged (identical business columns) and skipped. Deletes are
+    appended before creates and each is rendered into ``lines`` via the row's
+    ``__repr__``.
     """
-    for key in sorted(current.keys() | desired.keys()):
-        cur = current.get(key)
-        des = desired.get(key)
-        modified = cur is not None and des is not None and changed(cur, des)
-        if cur is not None and (des is None or modified):
-            plan.deletes.append(cur)
-            plan.lines.append(f"- {cur!r}")
-        if des is not None and (cur is None or modified):
-            plan.creates.append(des)
-            plan.lines.append(f"+ {des!r}")
+    for key in sorted(current.keys() - desired.keys()):
+        obj = current[key]
+        deletes.append(obj)
+        lines.append(f"- {obj!r}")
+    for key in sorted(desired.keys() - current.keys()):
+        obj = desired[key]
+        creates.append(obj)
+        lines.append(f"+ {obj!r}")
 
 
 def format_plan(plan: Plan) -> str:

@@ -16,7 +16,6 @@ from pia.models import (
 )
 from pia.sync import (
     DB,
-    DT_PENDING_UUID,
     DtProjectSpec,
     ProjectsFile,
     ProjectSpec,
@@ -134,27 +133,37 @@ def test_validate_rejects_unknown_field(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _db(*, ef=(), github=(), jenkins=(), dt=()) -> DB:
+    """Build a DB snapshot from object lists, keyed by diff_key like production."""
+    return DB(
+        ef={o.diff_key: o for o in ef},
+        github={o.diff_key: o for o in github},
+        jenkins={o.diff_key: o for o in jenkins},
+        dt={o.diff_key: o for o in dt},
+    )
+
+
 def test_compute_plan_creates_on_empty_db(session):
-    desired = DB(
-        ef={"eclipse-foo": EclipseFoundationProject(id="eclipse-foo")},
-        github={
-            ("eclipse-foo", "repo"): GitHubWorkload(
+    desired = _db(
+        ef=[EclipseFoundationProject(id="eclipse-foo")],
+        github=[
+            GitHubWorkload(
                 ef_project_id="eclipse-foo",
                 repo_owner="eclipse-foo",
                 repo_name="repo",
                 repo_owner_id="7",
             )
-        },
-        jenkins={
-            "https://ci.eclipse.org/foo/oidc": JenkinsWorkload(
+        ],
+        jenkins=[
+            JenkinsWorkload(
                 ef_project_id="eclipse-foo", issuer="https://ci.eclipse.org/foo/oidc"
             )
-        },
-        dt={
-            ("eclipse-foo", "prod"): DependencyTrackProject(
+        ],
+        dt=[
+            DependencyTrackProject(
                 ef_project_id="eclipse-foo", name="prod", parent_uuid="uuidX"
             )
-        },
+        ],
     )
     plan = compute_plan(session, desired)
     assert [p.id for p in plan.ef_create] == ["eclipse-foo"]
@@ -173,13 +182,15 @@ def test_compute_plan_noop_when_matching(seed_db):
 def test_compute_plan_update_is_delete_plus_create(seed_db):
     session = seed_db
     desired = _desired_matching_seed()
-    # Change the resolved owner id for the existing GitHub workload.
-    desired.github[("eclipse-test", "repo")] = GitHubWorkload(
+    # Change the resolved owner id for the existing GitHub workload (seed has
+    # exactly one), so its diff_key differs from the current row's.
+    gh = GitHubWorkload(
         ef_project_id="eclipse-test",
         repo_owner="eclipse-test",
         repo_name="repo",
         repo_owner_id="99",
     )
+    desired.github = {gh.diff_key: gh}
     plan = compute_plan(session, desired)
     # A modification is expressed as delete of the old row + create of the new.
     assert not plan.ef_create and not plan.ef_delete
@@ -193,21 +204,21 @@ def test_compute_plan_update_is_delete_plus_create(seed_db):
 def test_compute_plan_deletes_removed(seed_db):
     session = seed_db
     # Keep only eclipse-test's GitHub workload + DT project; drop everything else.
-    desired = DB(
-        ef={"eclipse-test": EclipseFoundationProject(id="eclipse-test")},
-        github={
-            ("eclipse-test", "repo"): GitHubWorkload(
+    desired = _db(
+        ef=[EclipseFoundationProject(id="eclipse-test")],
+        github=[
+            GitHubWorkload(
                 ef_project_id="eclipse-test",
                 repo_owner="eclipse-test",
                 repo_name="repo",
                 repo_owner_id="42",
             )
-        },
-        dt={
-            ("eclipse-test", "test-product"): DependencyTrackProject(
+        ],
+        dt=[
+            DependencyTrackProject(
                 ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             )
-        },
+        ],
     )
     plan = compute_plan(session, desired)
     assert [p.id for p in plan.ef_delete] == ["eclipse-other"]
@@ -222,13 +233,13 @@ def test_compute_plan_deletes_removed(seed_db):
 
 
 def test_apply_creates_then_idempotent(session):
-    desired = DB(
-        ef={"p": EclipseFoundationProject(id="p")},
-        github={
-            ("o", "r"): GitHubWorkload(
+    desired = _db(
+        ef=[EclipseFoundationProject(id="p")],
+        github=[
+            GitHubWorkload(
                 ef_project_id="p", repo_owner="o", repo_name="r", repo_owner_id="1"
             )
-        },
+        ],
     )
     apply_plan(session, compute_plan(session, desired))
     session.commit()
@@ -244,12 +255,13 @@ def test_apply_update_replaces_row(seed_db):
     # collide with the old row's unique key and must leave exactly one new row.
     session = seed_db
     desired = _desired_matching_seed()
-    desired.github[("eclipse-test", "repo")] = GitHubWorkload(
+    gh = GitHubWorkload(
         ef_project_id="eclipse-test",
         repo_owner="eclipse-test",
         repo_name="repo",
         repo_owner_id="99",
     )
+    desired.github = {gh.diff_key: gh}
     apply_plan(session, compute_plan(session, desired))
     session.commit()
 
@@ -261,21 +273,21 @@ def test_apply_update_replaces_row(seed_db):
 def test_apply_deletes_children_before_project(seed_db):
     session = seed_db
     # Reconcile to a file that no longer contains eclipse-other at all.
-    desired = DB(
-        ef={"eclipse-test": EclipseFoundationProject(id="eclipse-test")},
-        github={
-            ("eclipse-test", "repo"): GitHubWorkload(
+    desired = _db(
+        ef=[EclipseFoundationProject(id="eclipse-test")],
+        github=[
+            GitHubWorkload(
                 ef_project_id="eclipse-test",
                 repo_owner="eclipse-test",
                 repo_name="repo",
                 repo_owner_id="42",
             )
-        },
-        dt={
-            ("eclipse-test", "test-product"): DependencyTrackProject(
+        ],
+        dt=[
+            DependencyTrackProject(
                 ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             )
-        },
+        ],
     )
     apply_plan(session, compute_plan(session, desired))
     session.commit()
@@ -291,33 +303,35 @@ def test_apply_deletes_children_before_project(seed_db):
 
 def _desired_matching_seed() -> DB:
     """A DB that exactly mirrors the `seed_db` fixture contents."""
-    return DB(
-        ef={
-            i: EclipseFoundationProject(id=i)
-            for i in ("eclipse-test", "eclipse-other")
-        },
-        github={
-            ("eclipse-test", "repo"): GitHubWorkload(
+    return _db(
+        ef=[
+            EclipseFoundationProject(id="eclipse-test"),
+            EclipseFoundationProject(id="eclipse-other"),
+        ],
+        github=[
+            GitHubWorkload(
                 ef_project_id="eclipse-test",
                 repo_owner="eclipse-test",
                 repo_name="repo",
                 repo_owner_id="42",
             )
-        },
-        jenkins={
-            "https://ci.eclipse.org/eclipse-other/oidc": JenkinsWorkload(
+        ],
+        jenkins=[
+            JenkinsWorkload(
                 ef_project_id="eclipse-other",
                 issuer="https://ci.eclipse.org/eclipse-other/oidc",
             )
-        },
-        dt={
-            ("eclipse-test", "test-product"): DependencyTrackProject(
+        ],
+        dt=[
+            DependencyTrackProject(
                 ef_project_id="eclipse-test", name="test-product", parent_uuid="uuid-1"
             ),
-            ("eclipse-other", "other-product"): DependencyTrackProject(
-                ef_project_id="eclipse-other", name="other-product", parent_uuid="uuid-2"
+            DependencyTrackProject(
+                ef_project_id="eclipse-other",
+                name="other-product",
+                parent_uuid="uuid-2",
             ),
-        },
+        ],
     )
 
 
@@ -348,8 +362,7 @@ def patch_cli(session_factory, monkeypatch):
         project,
         api_key,
         root_cache=None,
-        create=False,
-        dry_run=False: "uuid-1",
+        create=False: "uuid-1",
     )
 
 
@@ -412,6 +425,51 @@ def test_sync_dry_run_writes_nothing(runner, tmp_path, session_factory, patch_cl
     assert "Plan:" in result.output
     with session_factory() as s:
         assert s.query(GitHubWorkload).count() == 0
+        assert s.query(EclipseFoundationProject).count() == 0
+
+
+def test_sync_dry_run_still_creates_dt_projects(
+    runner, tmp_path, session_factory, monkeypatch
+):
+    # --dry-run is scoped to the PIA database: with --create-dt-projects, missing
+    # DependencyTrack projects are still provisioned, but no DB rows are written.
+    # (patch_cli is intentionally not used here: it stubs out resolve_dt_child_uuid,
+    # which is exactly the DT-creation path under test.)
+    monkeypatch.setenv("PIA_DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("PIA_DEPENDENCY_TRACK_API_KEY", "test-key")
+    monkeypatch.setattr(cli_module, "_make_session", session_factory)
+    monkeypatch.setattr(
+        sync_module, "fetch_github_owner_id", lambda owner, token=None: "42"
+    )
+    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
+    puts = []
+
+    def fake_put(url, json=None, **k):
+        puts.append(json["name"])
+        return _resp({"uuid": f"uuid-{json['name']}", "name": json["name"]})
+
+    monkeypatch.setattr(sync_module.requests, "put", fake_put)
+
+    f = _write(
+        tmp_path,
+        """
+        projects:
+          - id: eclipse-foo
+            dependency_track:
+              - parent: "Eclipse Foo"
+                project: foo-server
+        """,
+    )
+    result = runner.invoke(
+        cli_module.cli,
+        ["sync", f, "--dt-url", "https://dt", "--dry-run", "--create-dt-projects"],
+    )
+    assert result.exit_code == 0, result.output
+    # DT projects were created despite --dry-run ...
+    assert puts == ["Eclipse Foo", "foo-server"]
+    # ... but nothing was written to the PIA database.
+    with session_factory() as s:
+        assert s.query(DependencyTrackProject).count() == 0
         assert s.query(EclipseFoundationProject).count() == 0
 
 
@@ -553,20 +611,6 @@ def test_resolve_dt_ambiguous_root_errors_even_with_create(monkeypatch):
         resolve_dt_child_uuid("http://dt", "Root", "Child", "key", create=True)
 
 
-def test_resolve_dt_dry_run_reports_pending_without_creating(monkeypatch):
-    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
-
-    def fail_put(*a, **k):
-        raise AssertionError("must not create projects under --dry-run")
-
-    monkeypatch.setattr(sync_module.requests, "put", fail_put)
-
-    uuid = resolve_dt_child_uuid(
-        "http://dt", "Root", "Child", "key", {}, create=True, dry_run=True
-    )
-    assert uuid == DT_PENDING_UUID
-
-
 def test_build_desired_creates_dt_projects(monkeypatch):
     monkeypatch.setattr(
         sync_module, "fetch_github_owner_id", lambda owner, token=None: "1"
@@ -590,27 +634,6 @@ def test_build_desired_creates_dt_projects(monkeypatch):
     )
     desired = build_desired(pf, "http://dt", "key", create_dt_projects=True)
 
-    assert desired.dt[("p", "Child")].parent_uuid == "uuid-Child"
+    (dtp,) = desired.dt.values()
+    assert dtp.parent_uuid == "uuid-Child"
     assert puts == ["Root", "Child"]
-
-
-def test_build_desired_dry_run_marks_dt_pending(monkeypatch):
-    monkeypatch.setattr(sync_module.requests, "get", lambda *a, **k: _resp([]))
-
-    def fail_put(*a, **k):
-        raise AssertionError("must not create projects under --dry-run")
-
-    monkeypatch.setattr(sync_module.requests, "put", fail_put)
-
-    pf = ProjectsFile(
-        projects=[
-            ProjectSpec(
-                id="p",
-                dependency_track=[DtProjectSpec(parent="Root", project="Child")],
-            )
-        ]
-    )
-    desired = build_desired(
-        pf, "http://dt", "key", create_dt_projects=True, dry_run=True
-    )
-    assert desired.dt[("p", "Child")].parent_uuid == DT_PENDING_UUID

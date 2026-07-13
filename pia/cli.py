@@ -54,7 +54,13 @@ def _make_session() -> Session:
     help="DependencyTrack base URL (required). This is the base, not the "
     "/api/v1/bom upload URL.",
 )
-@click.option("--dry-run", is_flag=True, help="Show the plan without writing.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show the plan without writing to the PIA database. Scoped to the "
+    "database only: with --create-dt-projects, missing DependencyTrack projects "
+    "are still created (they are a prerequisite, not part of the DB plan).",
+)
 @click.option(
     "--check",
     is_flag=True,
@@ -70,7 +76,8 @@ def _make_session() -> Session:
     is_flag=True,
     help="Create missing parent/child projects on DependencyTrack instead of "
     "failing when they do not exist; performs no deletion on DependencyTrack; "
-    "requires a DT API key with PORTFOLIO_MANAGEMENT permission.",
+    "requires a DT API key with PORTFOLIO_MANAGEMENT permission. Applies even "
+    "under --dry-run.",
 )
 def sync(
     file: str,
@@ -111,7 +118,6 @@ def sync(
         dt_api_key=dt_api_key,
         github_token=os.environ.get("PIA_GITHUB_TOKEN"),
         create_dt_projects=create_dt_projects,
-        dry_run=dry_run,
     )
 
     with _make_session() as session:

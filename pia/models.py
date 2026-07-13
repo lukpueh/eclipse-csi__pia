@@ -46,6 +46,11 @@ class EclipseFoundationProject(Base):
     # Here the PK is the Eclipse project identifier itself.
     id: Mapped[str] = mapped_column(String, primary_key=True)
 
+    @property
+    def diff_key(self) -> tuple[str, ...]:
+        """All business columns, used to key and diff DB snapshots (see sync.py)."""
+        return (self.id,)
+
     # __repr__ doubles as the human-readable line in the `pia sync` plan output.
     def __repr__(self) -> str:
         return f"Eclipse Project  ({self.id})"
@@ -102,6 +107,10 @@ class GitHubWorkload(Workload):
         "polymorphic_identity": "github",
     }
 
+    @property
+    def diff_key(self) -> tuple[str, ...]:
+        return (self.ef_project_id, self.repo_owner, self.repo_name, self.repo_owner_id)
+
     def __repr__(self) -> str:
         return (
             f"Github Workload  (project: {self.ef_project_id}, "
@@ -122,8 +131,14 @@ class JenkinsWorkload(Workload):
         "polymorphic_identity": "jenkins",
     }
 
+    @property
+    def diff_key(self) -> tuple[str, ...]:
+        return (self.ef_project_id, self.issuer)
+
     def __repr__(self) -> str:
-        return f"Jenkins Workload (project: {self.ef_project_id}, issuer: {self.issuer})"
+        return (
+            f"Jenkins Workload (project: {self.ef_project_id}, issuer: {self.issuer})"
+        )
 
 
 class DependencyTrackProject(Base):
@@ -142,6 +157,10 @@ class DependencyTrackProject(Base):
     parent_uuid: Mapped[str] = mapped_column(String)
 
     __table_args__ = (UniqueConstraint("name", "parent_uuid"),)
+
+    @property
+    def diff_key(self) -> tuple[str, ...]:
+        return (self.ef_project_id, self.name, self.parent_uuid)
 
     def __repr__(self) -> str:
         return (

@@ -6,9 +6,8 @@ hand (no network / DependencyTrack calls needed), then runs the real
 compute_plan + format_plan so the output is exactly what `pia sync` would print.
 Exercises every entry type across Eclipse Foundation projects, GitHub, Jenkins
 and DependencyTrack. A modification is expressed as a delete of the old row plus
-a create of the new one, so it shows as an adjacent -/+ pair; the demo also
-covers a workload moving between projects, the dry-run "(to-be-created)"
-sentinel, and the empty plan.
+a create of the new one (their diff_keys differ); the demo also covers a workload
+moving between projects and the empty plan.
 
 Usage:
     uv run python scripts/plan_demo.py
@@ -28,11 +27,7 @@ from pia.models import (
     JenkinsWorkload,
 )
 from pia.sync import (
-    DT_PENDING_UUID,
-    Desired,
-    DesiredDt,
-    DesiredGitHub,
-    DesiredJenkins,
+    DB,
     Plan,
     compute_plan,
     format_plan,
@@ -83,59 +78,68 @@ def seed_current(session) -> None:
     session.commit()
 
 
-def desired_target() -> Desired:
+def desired_target() -> DB:
     """The state the curated file wants (normally produced by build_desired)."""
-    return Desired(
+
+    def by_key(objs):
+        return {o.diff_key: o for o in objs}
+
+    return DB(
         # technology.legacy dropped -> delete; technology.bar added -> create.
-        ef_ids={"technology.foo", "technology.bar"},
-        github={
-            # unchanged key, owner_id 111 -> 222  => delete + create
-            ("eclipse-foo", "website"): DesiredGitHub(
-                ef_project_id="technology.foo",
-                repo_owner="eclipse-foo",
-                repo_name="website",
-                repo_owner_id="222",
-            ),
-            # brand new => create
-            ("eclipse-bar", "app"): DesiredGitHub(
-                ef_project_id="technology.bar",
-                repo_owner="eclipse-bar",
-                repo_name="app",
-                repo_owner_id="333",
-            ),
-        },
-        jenkins={
-            # same issuer, project foo -> bar  => delete + create (moves projects)
-            "https://ci.eclipse.org/foo/oidc": DesiredJenkins(
-                ef_project_id="technology.bar",
-                issuer="https://ci.eclipse.org/foo/oidc",
-            ),
-            # brand new => create
-            "https://ci.eclipse.org/bar/oidc": DesiredJenkins(
-                ef_project_id="technology.bar",
-                issuer="https://ci.eclipse.org/bar/oidc",
-            ),
-        },
-        dt={
-            # parent_uuid uuid-old -> uuid-new  => delete + create
-            ("technology.foo", "scanner"): DesiredDt(
-                ef_project_id="technology.foo",
-                name="scanner",
-                parent_uuid="uuid-new",
-            ),
-            # brand new, resolved uuid => create
-            ("technology.bar", "dashboard"): DesiredDt(
-                ef_project_id="technology.bar",
-                name="dashboard",
-                parent_uuid="uuid-bar-dashboard",
-            ),
-            # brand new, dry-run "would create" sentinel => create shown as pending
-            ("technology.bar", "pending-svc"): DesiredDt(
-                ef_project_id="technology.bar",
-                name="pending-svc",
-                parent_uuid=DT_PENDING_UUID,
-            ),
-        },
+        ef=by_key(
+            [
+                EclipseFoundationProject(id="technology.foo"),
+                EclipseFoundationProject(id="technology.bar"),
+            ]
+        ),
+        github=by_key(
+            [
+                # owner_id 111 -> 222 => diff_key differs => delete + create
+                GitHubWorkload(
+                    ef_project_id="technology.foo",
+                    repo_owner="eclipse-foo",
+                    repo_name="website",
+                    repo_owner_id="222",
+                ),
+                # brand new => create
+                GitHubWorkload(
+                    ef_project_id="technology.bar",
+                    repo_owner="eclipse-bar",
+                    repo_name="app",
+                    repo_owner_id="333",
+                ),
+            ]
+        ),
+        jenkins=by_key(
+            [
+                # same issuer, project foo -> bar => delete + create (moves projects)
+                JenkinsWorkload(
+                    ef_project_id="technology.bar",
+                    issuer="https://ci.eclipse.org/foo/oidc",
+                ),
+                # brand new => create
+                JenkinsWorkload(
+                    ef_project_id="technology.bar",
+                    issuer="https://ci.eclipse.org/bar/oidc",
+                ),
+            ]
+        ),
+        dt=by_key(
+            [
+                # parent_uuid uuid-old -> uuid-new => delete + create
+                DependencyTrackProject(
+                    ef_project_id="technology.foo",
+                    name="scanner",
+                    parent_uuid="uuid-new",
+                ),
+                # brand new, resolved uuid => create
+                DependencyTrackProject(
+                    ef_project_id="technology.bar",
+                    name="dashboard",
+                    parent_uuid="uuid-bar-dashboard",
+                ),
+            ]
+        ),
     )
 
 
