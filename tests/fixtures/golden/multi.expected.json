@@ -1,0 +1,40 @@
+{
+  "_comment": "Human-authored expected rows for multi.yaml. Note tools.gamma has no workloads or DT projects — it must still appear as an eclipse_foundation_projects row, and nothing else. Two DT projects share the same parent name but resolve to distinct uuids.",
+  "eclipse_foundation_projects": ["technology.alpha", "iot.beta", "tools.gamma"],
+  "github_workloads": [
+    {
+      "ef_project_id": "technology.alpha",
+      "repo_owner": "eclipse-alpha",
+      "repo_name": "one",
+      "repo_owner_id": "222",
+      "resolves": {"owner": "eclipse-alpha"}
+    },
+    {
+      "ef_project_id": "technology.alpha",
+      "repo_owner": "eclipse-alpha",
+      "repo_name": "two",
+      "repo_owner_id": "222",
+      "resolves": {"owner": "eclipse-alpha"}
+    }
+  ],
+  "jenkins_workloads": [
+    {
+      "ef_project_id": "iot.beta",
+      "issuer": "https://ci.eclipse.org/beta/oidc"
+    }
+  ],
+  "dependency_track_projects": [
+    {
+      "ef_project_id": "technology.alpha",
+      "name": "alpha-api",
+      "parent_uuid": "aaaaaaaa-0000-0000-0000-00000000000a",
+      "resolves": {"parent": "Eclipse Alpha", "project": "alpha-api"}
+    },
+    {
+      "ef_project_id": "technology.alpha",
+      "name": "alpha-web",
+      "parent_uuid": "aaaaaaaa-0000-0000-0000-00000000000b",
+      "resolves": {"parent": "Eclipse Alpha", "project": "alpha-web"}
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+projects:
+  - id: technology.foo
+    workloads:
+      - https://github.com/eclipse-foo/foo
+      - https://ci.eclipse.org/foo/oidc
+    dependency_track:
+      - parent: "Eclipse Foo"
+        project: foo-server

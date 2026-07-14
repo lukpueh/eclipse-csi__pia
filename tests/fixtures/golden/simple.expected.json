@@ -1,0 +1,27 @@
+{
+  "_comment": "Human-authored expected rows for simple.yaml. This is the trusted oracle: it was written by reading the file, NOT by running pia sync. repo_owner_id and parent_uuid are the externally-resolved fields; the values here are the ones the golden test seeds and expects back.",
+  "eclipse_foundation_projects": ["technology.foo"],
+  "github_workloads": [
+    {
+      "ef_project_id": "technology.foo",
+      "repo_owner": "eclipse-foo",
+      "repo_name": "foo",
+      "repo_owner_id": "111",
+      "resolves": {"owner": "eclipse-foo"}
+    }
+  ],
+  "jenkins_workloads": [
+    {
+      "ef_project_id": "technology.foo",
+      "issuer": "https://ci.eclipse.org/foo/oidc"
+    }
+  ],
+  "dependency_track_projects": [
+    {
+      "ef_project_id": "technology.foo",
+      "name": "foo-server",
+      "parent_uuid": "11111111-1111-1111-1111-111111111111",
+      "resolves": {"parent": "Eclipse Foo", "project": "foo-server"}
+    }
+  ]
+}

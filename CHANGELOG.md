@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+* `pia verify` command: independent cross-check that the database matches the
+  curated file, sharing none of the sync reconcile logic. Structural check is
+  offline; `--check-resolution` re-verifies resolved GitHub owner ids and
+  DependencyTrack parent uuids against their sources. Golden fixtures pin the
+  verifier's projection to human-authored expected rows.
+
 ## [0.5.0] - 2026-07-03
 
 ### Changed

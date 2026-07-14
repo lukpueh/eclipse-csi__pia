@@ -1,0 +1,14 @@
+projects:
+  - id: technology.alpha
+    workloads:
+      - https://github.com/eclipse-alpha/one
+      - https://github.com/eclipse-alpha/two
+    dependency_track:
+      - parent: "Eclipse Alpha"
+        project: alpha-api
+      - parent: "Eclipse Alpha"
+        project: alpha-web
+  - id: iot.beta
+    workloads:
+      - https://ci.eclipse.org/beta/oidc
+  - id: tools.gamma
