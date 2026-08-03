@@ -240,7 +240,11 @@ def _dt_create_project(
     return response.json()
 
 
-_missing_dt_hint = " — run `pia create-dt-projects` to provision it first"
+_missing_dt_hint = (
+    " — run `pia create-dt-projects` to provision it first, or update the "
+    "curated file to match an existing project on DependencyTrack "
+    "(check for correct spelling or project renames on DependencyTrack)."
+)
 
 
 def _resolve_one_or_create(
