@@ -35,3 +35,4 @@ jobs:
         sbom-file: sbom.json
         product-name: ${{ env.NAME }}
         product-version: ${{ env.VERSION }}
+        staging: true
