@@ -410,6 +410,24 @@ DependencyTrack project matches), so a success counter on the same metric would
 double-count. Use `pia_http_requests_total` as the denominator and
 `pia_sbom_uploads_total{outcome="success"}` as the success rate.
 
+**Series initialization.** `prometheus_client` creates a labeled series on its
+first increment, so Prometheus never scrapes the zero and `rate()` or
+`increase()` lose the event that created the series, after every restart. At
+startup, `main.initialize_metrics` therefore creates every known label
+combination at zero (`metrics.initialize_series`): all rejection reasons, the
+upload route with the statuses it is known to produce, and every outcome for
+every registered Eclipse Foundation and DependencyTrack project. Projects
+registered after startup get their series on first use, as before. A database
+that is unreachable at startup is logged and skipped rather than failing
+startup.
+
+For the same reason, dashboards should derive counts over a range from
+`increase()`, which reads every sample in the window including those of a pod
+that has since been replaced, and handles counter resets. Subtracting a
+counter from its own `offset` value does neither: a replaced pod's series is
+stale at the evaluation instant and drops out, and a reset within one series
+turns the difference negative.
+
 **Label cardinality.** Every label value comes from a fixed set or from a
 database row, never from unvalidated request input:
 

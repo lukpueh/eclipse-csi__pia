@@ -15,7 +15,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_PLAIN_0_0_4, generate_latest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.requests import ClientDisconnect
 
@@ -23,7 +24,9 @@ from . import __version__, dependencytrack, metrics, oidc
 from .config import Settings
 from .metrics import RejectionReason, UploadOutcome
 from .models import (
+    DependencyTrackProject,
     DependencyTrackUploadPayload,
+    EclipseFoundationProject,
     PiaUploadPayload,
     PiaUploadResponse,
     Workload,
@@ -62,6 +65,16 @@ logger = logging.getLogger(__name__)
 ISSUE_TRACKER_URL = "https://github.com/eclipse-csi/pia/issues"
 """Pointer included in rejection responses, so callers can ask for a change."""
 
+UPLOAD_PATH = "/v1/upload/sbom"
+
+UPLOAD_STATUSES = ("200", "401", "422", "500", "502", metrics.DISCONNECTED_STATUS)
+"""Statuses `upload_sbom` is known to produce, pre-created at startup.
+
+200 success, 401 from `_401`, 422 from request validation, 502 when
+DependencyTrack is unreachable, 500 for an unparseable DependencyTrack
+response or an unhandled exception. Statuses relayed from DependencyTrack are
+open-ended and get their series on first use."""
+
 
 # Load settings
 settings = Settings()
@@ -70,7 +83,7 @@ logger.info("PIA application settings loaded successfully")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize database engine and session factory on app startup."""
+    """Initialize database engine, session factory, and metric series."""
     engine = create_engine(
         settings.database_url,
         pool_pre_ping=True,
@@ -78,6 +91,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.session_factory = sessionmaker(bind=engine)
     logger.info("Database engine and session factory initialized")
+    initialize_metrics(app.state.session_factory)
     yield
     # Release pooled connections at shutdown.
     engine.dispose()
@@ -178,6 +192,36 @@ async def assign_request_id(
         return response
     finally:
         request_id.reset(token)
+
+
+def initialize_metrics(session_factory: sessionmaker) -> None:
+    """Pre-create metric series, see `metrics.initialize_series`.
+
+    The label values that do not depend on the database are created first, so
+    a database that is down at startup only costs the per-project series.
+    Startup must not fail on it: the pod would crash-loop over a cosmetic
+    problem while uploads could otherwise be served once the database is back.
+    """
+    metrics.initialize_series(routes={("POST", UPLOAD_PATH): UPLOAD_STATUSES})
+    try:
+        with session_factory() as session:
+            ef_project_ids = session.scalars(select(EclipseFoundationProject.id)).all()
+            dt_projects = session.execute(
+                select(
+                    DependencyTrackProject.ef_project_id, DependencyTrackProject.name
+                )
+            ).all()
+    except SQLAlchemyError as e:
+        logger.warning(f"Could not pre-create per-project metric series: {e!a}")
+        return
+    metrics.initialize_series(
+        ef_project_ids=ef_project_ids,
+        dt_projects=[(ef_project_id, name) for ef_project_id, name in dt_projects],
+    )
+    logger.info(
+        f"Metric series pre-created for {len(ef_project_ids)} projects "
+        f"and {len(dt_projects)} DependencyTrack projects"
+    )
 
 
 def get_session(request: Request):
@@ -352,7 +396,7 @@ async def get_metrics():
     )
 
 
-@app.post("/v1/upload/sbom", status_code=status.HTTP_200_OK)
+@app.post(UPLOAD_PATH, status_code=status.HTTP_200_OK)
 def upload_sbom(
     payload: PiaUploadPayload,
     workload: Annotated[Workload, Depends(authenticate)],

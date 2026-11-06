@@ -6,7 +6,8 @@ Dockerfile CMD); running with ``--workers`` would need prometheus_client's
 multiprocess mode.
 """
 
-from typing import Literal
+from collections.abc import Iterable, Mapping
+from typing import Literal, get_args
 
 from prometheus_client import Counter, Histogram, Info
 from prometheus_client.utils import INF
@@ -142,3 +143,48 @@ SBOM_SIZE = Histogram(
 # Exposed as `pia_build_info`; Info appends the `_info` suffix itself.
 BUILD = Info("pia_build", "PIA build information.")
 BUILD.info({"version": __version__})
+
+
+def initialize_series(
+    *,
+    ef_project_ids: Iterable[str] = (),
+    dt_projects: Iterable[tuple[str, str]] = (),
+    routes: Mapping[tuple[str, str], Iterable[str]] = {},
+) -> None:
+    """Create every known label combination of the counters at zero.
+
+    prometheus_client only creates a labeled series on its first ``.inc()``,
+    so Prometheus never scrapes the zero: ``rate()`` and ``increase()`` count
+    from the first sample they see, and the event that created the series is
+    lost after every restart. With the series already at zero, the first event
+    after a restart shows up as an increase of one.
+
+    Only label values from the same bounded sets as at runtime are created,
+    so this adds no cardinality that the first event would not have added.
+    Projects registered after startup get their series on first use, as before.
+
+    ``dt_projects`` are ``(ef_project_id, name)`` pairs; ``routes`` maps
+    ``(method, path)`` to the response statuses the route is known to produce.
+    """
+    for reason in get_args(RejectionReason):
+        UPLOAD_REJECTIONS.labels(reason=reason)
+
+    for (method, path), statuses in routes.items():
+        HTTP_REQUEST_DURATION.labels(method=method, path=path)
+        for status in statuses:
+            HTTP_REQUESTS.labels(method=method, path=path, status=status)
+
+    # `no_dt_project` is recorded against the *workload's* project with the
+    # unregistered sentinel, the other outcomes against a resolved product.
+    for ef_project_id in ef_project_ids:
+        SBOM_UPLOADS.labels(
+            ef_project_id=ef_project_id,
+            product_name=UNREGISTERED_PRODUCT,
+            outcome="no_dt_project",
+        )
+    for ef_project_id, name in dt_projects:
+        for outcome in get_args(UploadOutcome):
+            if outcome != "no_dt_project":
+                SBOM_UPLOADS.labels(
+                    ef_project_id=ef_project_id, product_name=name, outcome=outcome
+                )

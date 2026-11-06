@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+* Pre-create metric series at startup, so that the first rejection, upload
+  or error after a restart is no longer invisible to Prometheus `rate()` and
+  `increase()`
+
 ## [0.9.0] - 2026-10-20
 
 ### Added
