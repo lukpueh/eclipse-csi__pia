@@ -1,0 +1,51 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    groups:
+      test-and-lint-dependencies:
+        # Dev-only tooling from [dependency-groups].dev; never ships in the image
+        patterns:
+          - "ruff"
+          - "mypy"
+          - "pytest"
+          - "pytest-cov"
+          - "httpx"
+          - "types-*"
+      dependencies:
+        # Runtime dependencies, plus anything not caught by earlier groups
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    ignore:
+      # Python minor bumps must move .python-version along (enforced in CI)
+      # and wait for wheels of compiled deps (e.g. psycopg-binary), so they
+      # are done by hand; patch bumps stay automatic.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    groups:
+      action-dependencies:
+        patterns:
+          - "*"

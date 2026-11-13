@@ -8,6 +8,14 @@ from .models import DependencyTrackUploadPayload
 
 logger = logging.getLogger(__name__)
 
+TIMEOUT = (5, 30)
+"""Connect and read timeouts for the DependencyTrack upload request, in seconds.
+
+Without a timeout a hung DependencyTrack blocks the request forever, and holds
+one of the server's threadpool workers with it. The read timeout is generous
+because it bounds silence between bytes, not the total upload time, and SBOMs
+can be several MB."""
+
 
 class DependencyTrackError(Exception):
     """Raised when DependencyTrack API request fails."""
@@ -27,13 +35,14 @@ def upload_sbom(
     }
 
     try:
-        logger.info(f"Uploading SBOM to DependencyTrack at {url}")
+        logger.debug(f"Uploading SBOM to DependencyTrack at {url}")
         response = requests.put(
             url,
             json=payload.to_dict(),
             headers=headers,
+            timeout=TIMEOUT,
         )
-        logger.info(f"DependencyTrack responded with status {response.status_code}")
+        logger.debug(f"DependencyTrack responded with status {response.status_code}")
         return response
 
     except requests.RequestException as e:

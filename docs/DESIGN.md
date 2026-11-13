@@ -10,7 +10,8 @@ the artifact came from the project's build infrastructure, using OpenID Connect
 (OIDC).
 
 In the initial use case, described in this document, PIA serves as intermediary
-between Eclipse build infrastructure (GitHub Actions, Jenkins Pipelines) and
+between Eclipse build infrastructure (GitHub Actions, GitLab CI, Jenkins
+Pipelines) and
 the Eclipse DependencyTrack registry. This enables project-level access control
 for SBOM uploads to DependencyTrack. Later, PIA may extend to other use cases that
 benefit from this authentication.
@@ -29,7 +30,8 @@ PIA implements a "Trusted Publishing" architecture using OIDC to:
 - Verify project ownership through Identity Provider claims
 - Eliminate need for long-lived credentials and manual secrets management
   between build infrastructure and DependencyTrack
-- Support multiple build platforms (GitHub Actions, Jenkins, extensible to others)
+- Support multiple build platforms (GitHub Actions, GitLab CI, Jenkins,
+  extensible to others)
 - Provide a scalable architecture (extensible to other artifacts and registries)
 
 ## 2. Architecture
@@ -38,8 +40,8 @@ PIA implements a "Trusted Publishing" architecture using OIDC to:
 
 ```mermaid
 sequenceDiagram
-    participant Publisher as Publisher<br/>(GHA, Jenkins Pipeline)
-    participant IdP as Identity Provider<br/>(GitHub, Jenkins Controller)
+    participant Publisher as Publisher<br/>(GHA, GitLab CI, Jenkins Pipeline)
+    participant IdP as Identity Provider<br/>(GitHub, GitLab, Jenkins Controller)
     participant PIA as PIA<br/>
     participant dp as DependencyTrack<br/>
 
@@ -58,13 +60,15 @@ sequenceDiagram
 ```
 
 #### Publisher
-- GitHub Action workflow or Jenkins Pipeline
+- GitHub Actions workflow, GitLab CI pipeline or Jenkins Pipeline
 - Generates SBOMs
 - Requests identity token from its Identity Provider
 - Sends SBOM + token to PIA
 
 #### Identity Provider
 - **GitHub**: Central OIDC provider (provided by GitHub)
+- **GitLab**: Central OIDC provider of the Eclipse GitLab instance (managed by
+  Eclipse Foundation)
 - **Jenkins**: Per-instance OIDC Provider (enabled via plugin)
 - Issues cryptographically signed JWT tokens with claims about publisher identity
 - Serves OIDC configuration and public keys from well known location
@@ -83,6 +87,8 @@ sequenceDiagram
 1. **Identity Provider** trusts **Publisher** because:
    - Each GitHub Publisher has a built-in auth token for the central GitHub
      Identity Provider (managed by GitHub)
+   - Each GitLab Publisher can request an ID token from the central Eclipse
+     GitLab Identity Provider (managed by Eclipse Foundation)
    - Each Jenkins Publisher has its own Identity Provider running on the same
      Jenkins instance (managed by Eclipse Foundation)
 2. **PIA** trusts **Identity Provider** because PIA has a projects database for
@@ -97,6 +103,8 @@ sequenceDiagram
 1. **Token Request**: Publisher requests ID token from Identity Provider
 
    - GitHub: Uses `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`
+   - GitLab: Uses the `id_tokens` keyword of the job, which exposes the token
+     as an environment variable
    - Jenkins: Uses credentials binding plugin with pre-configured credential
 
 2. **Token Issuance**: Identity Provider returns JWT with minimal required claims:
@@ -108,6 +116,7 @@ sequenceDiagram
    - Platform-specific:
      - GitHub: `repository`, `repository_owner`, `repository_owner_id` identify
        the publishing repository
+     - GitLab: `project_path`, `project_id` identify the publishing project
      - Jenkins: `iss` identifies the project via URL path
 
 3. **Publish Request**: Publisher sends POST request to PIA:
@@ -154,12 +163,16 @@ sequenceDiagram
    2. Extract issuer
    3. Verify issuer is known
       - GitHub: Full match: `https://token.actions.githubusercontent.com`
+      - GitLab: Full match: `https://gitlab.eclipse.org`
       - Jenkins: Full match against the `issuer` of a Jenkins workload already
         registered in the workload database.
 3. Token Key Discovery
    1. Fetch OIDC configuration from `{issuer}/.well-known/openid-configuration`
-   2. Extract `jwks_uri` from configuration
-   3. Fetch public keys from `jwks_uri`
+      (max. 1 MiB, 10s per-read timeout, redirects are not followed)
+   2. Extract `jwks_uri` from configuration and verify it is a path under
+      `{issuer}/` (string prefix match, no URL parsing)
+   3. Fetch public keys from `jwks_uri` (max. 1 MiB, 10s per-read timeout,
+      redirects are not followed)
    4. Match key using `kid` claim from token header
 4. Token Validation and Signature Verification
    1. Verify generally required claims are present
@@ -170,13 +183,23 @@ sequenceDiagram
    1. Find workload type by issuer
    2. Find workload by matching verified token claims against workload database:
       - GitHub: match `repo_owner`, `repo_name`, `repo_owner_id`
+      - GitLab: match `project_path`, `project_id` (not `job_project_*`, see
+        `P-WORKLOAD-BIND` in the [threat model](../threat-model.md))
       - Jenkins: match `issuer`. (repeats step 2.3, with different semantics: there we
         check the *unverified* issuer URL to prevent arbitrary requests in steps 3 and 4;
         here we authenticate a workload based on verified token claims)
 6. Workload-Specific Claim Verification
-   - GitHub: `event_name` must be in the allowlist `{push, workflow_dispatch}`.
-     Excludes triggers that can be indirectly driven by non-maintainers
-     (`pull_request_target`, `workflow_run`, `issue_comment`, …).
+   - GitHub: `event_name` must be in the allowlist
+     `{push, workflow_dispatch, release, schedule}`, i.e. events that only a
+     maintainer can cause. Excludes triggers that can be indirectly driven by
+     non-maintainers (`pull_request_target`, `workflow_run`, `issue_comment`, …).
+   - GitLab: `pipeline_source` must be in the allowlist `{push, web, schedule, api}`,
+     i.e. pipelines that only a committer can cause. `api` is allowed because
+     a token that can create one can already push commits; `trigger` is
+     excluded because a trigger token cannot push and is meant to be shared
+     outside the project. Also excludes `external_pull_request_event`,
+     `merge_request_event`, … (see `P-WORKLOAD-BIND` in the
+     [threat model](../threat-model.md)).
    - Jenkins: no additional checks.
 
 ## 4. API Design
@@ -219,9 +242,21 @@ Content-Type: application/json
   - Issuer not allowed
   - No matching workload found for token claims
   - No matching DependencyTrack project found
-- `422 Unprocessable Entity`: Missing Authorization header or invalid JSON
+- `422 Unprocessable Entity`: Missing Authorization header, invalid JSON or
+  malformed payload fields (see §5.3)
 - `502`: DependencyTrack upload request failed
 - `*`: Relay DependencyTrack status code and body verbatim (non-2xx)
+
+#### GET /livez
+
+Kubernetes liveness probe. Returns `200 OK` with `{"status": "ok"}`.
+
+#### GET /metrics
+
+Prometheus scrape endpoint, served on the application port and
+unauthenticated. Returns the Prometheus text exposition format
+(`text/plain; version=0.0.4; charset=utf-8`). The ingress does not route it
+publicly. See section 5.4 for the metric inventory.
 
 
 ### 4.2 Settings
@@ -261,7 +296,7 @@ A CI/CD entity that can upload SBOMs. Uses joined-table inheritance with a
 |--------|------|-------|
 | `id` | Serial PK | |
 | `ef_project_id` | FK → eclipse_foundation_projects.id | |
-| `type` | String | Discriminator: `github` or `jenkins` |
+| `type` | String | Discriminator: `github`, `gitlab` or `jenkins` |
 
 #### GitHubWorkload (extends Workload)
 Issuer is always `https://token.actions.githubusercontent.com` (constant, not
@@ -275,6 +310,17 @@ stored).
 | `repo_name` | String | Repository name (e.g. `my-repo`) |
 | `repo_owner` | String | Repository owner (e.g. `eclipse-foo`) |
 | `repo_owner_id` | String | GitHub numeric owner ID |
+
+#### GitLabWorkload (extends Workload)
+Issuer is always `https://gitlab.eclipse.org` (constant, not stored).
+
+**Uniqueness:** `UNIQUE(project_path, project_id)`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | FK → workloads.id | |
+| `project_path` | String | Full project path incl. groups (e.g. `eclipse/foo/bar`) |
+| `project_id` | String | GitLab numeric project ID (never reused) |
 
 #### JenkinsWorkload (extends Workload)
 Each Jenkins workload has a distinct issuer URL.
@@ -307,7 +353,8 @@ can upload SBOMs for any DependencyTrack project that shares the same Eclipse
 Foundation project id.
 
 A workload identity — a GitHub repository (`repo_owner`, `repo_name`,
-`repo_owner_id`) or a Jenkins `issuer` — belongs to **exactly one** Eclipse
+`repo_owner_id`), a GitLab project (`project_path`, `project_id`) or a Jenkins
+`issuer` — belongs to **exactly one** Eclipse
 Foundation project. This is enforced by the workload uniqueness constraints.
 Within that scope the target DependencyTrack project is selected by
 `product_name`, and `UNIQUE(ef_project_id, name)` makes that selection
@@ -319,12 +366,13 @@ project bound to a single EF project.
 ### 5.1 Technology Stack
 
 - **Web Framework**: FastAPI (modern, has built-in model validation and API documentation)
-- **Database**: PostgreSQL with SQLAlchemy ORM, `psycopg2`, and Alembic for schema migrations
+- **Database**: PostgreSQL with SQLAlchemy ORM, `psycopg` (v3), and Alembic for schema migrations
 - **HTTP Client**: `requests` for OIDC discovery and DependencyTrack API calls
 - **JWT Library**: `PyJWT` with `cryptography` support
   - Handles token parsing, validation, and signature verification
   - Includes `PyJWKClient` for JWKS key fetching
 - **CLI**: `click`
+- **Metrics**: `prometheus_client` (official Prometheus Python client)
 - **Testing**: `pytest`
 - **Linting**: `ruff`
 - **Python Project Management**: `uv`
@@ -338,11 +386,13 @@ project bound to a single EF project.
 - `models.py`: Data models:
   - SQLAlchemy declarative `Base`
   - SQLAlchemy ORM models: `EclipseFoundationProject`, `Workload`,
-    `GitHubWorkload`, `JenkinsWorkload`, `DependencyTrackProject`
+    `GitHubWorkload`, `GitLabWorkload`, `JenkinsWorkload`,
+    `DependencyTrackProject`
     (see section 4.3)
   - Pydantic request models: `PiaUploadPayload`, `DependencyTrackUploadPayload`
 - `oidc.py`: OIDC token validation and signature verification using PyJWT
 - `dependencytrack.py`: DependencyTrack API upload client for SBOMs
+- `metrics.py`: Prometheus metric definitions (see section 5.4)
 - `cli.py`: Management CLI for registering Workloads and DependencyTrackProjects
   (see section 5.5)
 
@@ -351,10 +401,16 @@ project bound to a single EF project.
 - **Settings Errors**: Fail fast at startup with clear error
 
 - **Authentication Errors**:
-  - 422 for malformed POST data
-  - 401 for unknown issuer, token verification errors, no matching workload
-    found for verified token claims, or no matching DependencyTrack project
-    for the workload's `ef_project_id`
+  - 422 for malformed POST data: the payload model is strict (no type
+    coercion), and `product_name` and `product_version` must be non-empty and
+    printable; `bom` content is left to DependencyTrack
+  - 401 for unknown or malformed issuer, token verification errors, no
+    matching workload found for verified token claims, or no matching
+    DependencyTrack project for the workload's `ef_project_id`
+  - Token claims used for matching (`iss`, GitHub `repository` and
+    `repository_owner_id`, GitLab `project_path` and `project_id`) must be
+    printable strings before they are compared or used in a database query; a
+    claim that is not is treated as no match
 
 - **DependencyTrack Upload Errors**: 502, if upload fails with an error, or HTTP
     status code from DependencyTrack
@@ -368,12 +424,60 @@ Log important events:
 - DependencyTrack uploads
 - Errors
 
-Metrics to track:
-- Client connect attempts by IP
-- Client connect attempts by `product_name` and `product_version`
-- Token verification time
-- DependencyTrack upload time
-- Total API response time
+Metrics are exposed in Prometheus text format at `GET /metrics` on the
+application port, unauthenticated. The endpoint is not routed publicly by the
+ingress; Prometheus scrapes it cluster-internally.
+
+| Metric | Type | Labels | Purpose |
+|--------|------|--------|---------|
+| `pia_http_requests_total` | counter | `method`, `path`, `status` | Request volume and error rate |
+| `pia_http_request_duration_seconds` | histogram | `method`, `path` | Total API response time |
+| `pia_upload_rejections_total` | counter | `reason` | Why uploads are rejected with 401 |
+| `pia_token_verification_duration_seconds` | histogram | — | Token verification time |
+| `pia_oidc_fetch_duration_seconds` | histogram | `phase` (`discovery`, `jwks`) | Baseline for the OIDC/JWKS caching in section 10 |
+| `pia_dependencytrack_upload_duration_seconds` | histogram | — | DependencyTrack upload time |
+| `pia_sbom_uploads_total` | counter | `ef_project_id`, `product_name`, `outcome` | Uploads per product and their outcome |
+| `pia_sbom_size_bytes` | histogram | — | Decoded SBOM size |
+| `pia_build_info` | info | `version` | Deployed version |
+
+`prometheus_client` additionally exports its default `process_*` (Linux only),
+`python_gc_*`, and `python_info` collectors.
+
+There is deliberately no `success` value on `pia_upload_rejections_total`: the
+`_401` helper is also reached *after* authentication succeeds (when no
+DependencyTrack project matches), so a success counter on the same metric would
+double-count. Use `pia_http_requests_total` as the denominator and
+`pia_sbom_uploads_total{outcome="success"}` as the success rate.
+
+**Label cardinality.** Every label value comes from a fixed set or from a
+database row, never from unvalidated request input:
+
+- `path` is the matched route template, never the raw request path. Requests
+  matching no route collapse to `<unmatched>`.
+- `method` is checked against the standard HTTP methods and otherwise collapses
+  to `<other>`. The middleware sees the method before any routing or method
+  validation, and the HTTP parser accepts any token as a method, so the raw
+  value would let an unauthenticated request mint a permanent series.
+- `status` is the response status, or `<disconnected>` when no response was
+  produced because the client hung up or the request was cancelled, so an abort
+  outside our control does not inflate the 5xx rate.
+- `reason` and `outcome` are `Literal` types in `pia/metrics.py`, so mypy
+  rejects any value outside the declared set — a new rejection path cannot
+  silently widen the metric.
+- `product_name` is only labeled with a name that resolved to a
+  `DependencyTrackProject` row. Uploads rejected before that resolution are
+  labeled `_unregistered`, because the requested name is caller-controlled.
+- `product_version` is deliberately **not** a label: a new version per release
+  or per commit is unbounded. DependencyTrack is the authoritative index by
+  version.
+- Client IP is deliberately **not** a label, for the same reason (GitHub
+  Actions runners egress from rotating address ranges). Per-IP data is
+  available in the reverse proxy's access log.
+
+**Single worker.** Metrics live in `prometheus_client`'s default in-process
+registry. The container runs one uvicorn worker (see the Dockerfile `CMD`);
+running with `--workers` would require `prometheus_client`'s multiprocess mode.
+Scaling across pods is unaffected — Prometheus aggregates over scrape targets.
 
 ### 5.5 CLI Tool
 
@@ -386,11 +490,11 @@ using the `PIA_DATABASE_URL` environment variable, e.g.
 
 Reconciles the whole authorization state to match a curated projects file. The
 file lists Eclipse Foundation projects, each with a flat list of workload URLs
-(GitHub repo or Jenkins instance URL — classified by host) and a single
-DependencyTrack project with its products. `sync` resolves the external
-data (GitHub owner ids, DependencyTrack child UUIDs), diffs the desired state
-against the database, prints a plan, and applies it so the database matches the
-file.
+(GitHub repo, GitLab project or Jenkins instance URL — classified by host) and
+a single DependencyTrack project with its products. `sync` resolves the
+external data (GitHub owner ids, GitLab project ids, DependencyTrack child
+UUIDs), diffs the desired state against the database, prints a plan, and
+applies it so the database matches the file.
 
 Example projects file:
 
@@ -399,6 +503,7 @@ projects:
   - id: technology.foo
     workloads:
       - https://github.com/eclipse-foo/repo
+      - https://gitlab.eclipse.org/eclipse/foo/repo
       - https://ci.eclipse.org/foo
     dependency_track:
       project: "Eclipse Foo"
@@ -416,6 +521,11 @@ Foundation project to DependencyTrack project mapping 1:1: the file structure
 gives one DependencyTrack project per Eclipse project, this rule gives one
 Eclipse project per DependencyTrack project.
 
+A GitLab project URL must use the project's canonical path (as GitLab displays
+it): `sync` looks the project up via the GitLab API, which is case-insensitive,
+and rejects the file if the returned `path_with_namespace` differs. The stored
+path is compared verbatim against the token's `project_path` claim on upload.
+
 #### `pia create-dt-projects`
 
 Ensures the DependencyTrack project and products of every Eclipse Foundation
@@ -426,37 +536,12 @@ DependencyTrack targets.
 
 ## 6. Security Considerations
 
-### 6.1 Token Validation
-
-- **Issuer and Project**: Only trust allowed issuers and projects
-- **Expiration**: Reject expired tokens
-- **Signature**: Verify signature before trusting claims
-- **Algorithm**: Only accept RS256 (Identity Provider restriction)
-- **Key Rotation**: Refresh OIDC configs and JWKs
-
-### 6.2 Attack Vectors
-
-| Attack | Mitigation |
-|--------|-----------|
-| Token replay | Short-lived tokens (5-10 min), do not re-use token  (future work) |
-| Issuer spoofing | HTTPS-only issuer URLs, strict URL validation |
-| Token forgery | Cryptographic signature verification |
-| Project impersonation | Claim-to-workload validation, project-scoped DependencyTrack project resolution |
-| DoS via OIDC discovery | Cache OIDC discovery, rate limit requests (both future work) |
-| Parsing vulnerabilities | Use minimal schema for unauthenticated POST data, use well-tested JWT library for token parsing |
-
-### 6.3 Secrets Management
-
-- Store secrets securely in environment variables
-- Never log tokens or credentials
-- Rotate DependencyTrack credentials regularly
-
-### 6.4 HTTPS Requirements
-
-- All communication must use HTTPS:
-  - PIA API endpoint
-  - OIDC discovery URLs
-  - DependencyTrack API endpoint
+PIA's security contract — what it assumes about its environment, callers and
+peers, which properties it guarantees, which it deliberately does not, and what
+operators and publishers own — is maintained in the
+[threat model](../threat-model.md) at the repository root, together with its
+machine-readable companions `threat-model.yaml` and `threat-model.json`.
+Inbound findings are triaged against it (see its §1.1 quick-start and §1.17).
 
 ## 7. Platform-Specific Details
 
@@ -546,6 +631,33 @@ pipeline {
 }
 ```
 
+### 7.3 Eclipse GitLab CI
+
+**Identity Provider**:
+- Issuer: `https://gitlab.eclipse.org` (one central provider for all GitLab
+  workloads, run by the Eclipse Foundation)
+- OIDC config path: `/.well-known/openid-configuration`
+
+**Verified Claims**:
+- `project_path`: Full path of the project including its groups, e.g.
+  `eclipse/foo/bar`
+- `project_id`: GitLab numeric project ID, never reused by GitLab
+- `pipeline_source`: Must be in the allowlist `{push, web, schedule, api}`
+
+**Example Publisher pipeline** (`.gitlab-ci.yml`):
+```yaml
+publish-sbom:
+  id_tokens:
+    PIA_ID_TOKEN:
+      aud: pia.eclipse.org
+  script:
+    - |
+      curl -X POST https://pia.eclipse.org/v1/upload/sbom \
+        -H "Authorization: Bearer ${PIA_ID_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"product_name": "...", "product_version": "...", "bom": "..."}'
+```
+
 ## 8. Deployment
 
 ### 8.1 Environment
@@ -590,9 +702,23 @@ PIA_EXPECTED_AUDIENCE=pia.eclipse.org  # optional, has default
 
 ## 10. Future Work
 
-- Add caching for oidc config and jwks
-- Add monitoring
-- Make upload API async, if sync takes too long
+- Add caching for oidc config and jwks. `verify_token` fetches both on every
+  request; `pia_oidc_fetch_duration_seconds{phase}` gives the per-phase
+  before/after baseline.
+- Refactor authentication and upload to async I/O with deadlines (e.g.
+  `httpx.AsyncClient` under `asyncio.timeout`), instead of blocking I/O in the
+  threadpool. PIA currently does not prevent slow retrieval attacks: the 10s
+  timeout on OIDC discovery and JWKS requests applies per socket read, and the
+  deadline is only checked between reads of body data. Reads of response
+  headers, chunked framing (chunk-size lines, extensions, trailers) and the TLS
+  handshake are bounded only per read, so an issuer can hold a worker
+  indefinitely by trickling them. Only a registered issuer can exploit this,
+  since PIA only fetches from known issuers. An outer deadline that cancels the
+  whole request would close this gap.
+- If uploads take too long, don't make clients wait for them: accept the SBOM
+  and immediately return a token, which clients can use to poll the upload
+  status, like DependencyTrack's own BOM upload API does. This is about the API
+  contract with clients, independent of whether PIA does async I/O internally.
 - Protect against replayed tokens (PyPI uses "jti" claim to track used tokens)
 - Consider product-level authentication
 
@@ -600,6 +726,7 @@ PIA_EXPECTED_AUDIENCE=pia.eclipse.org  # optional, has default
 
 - [Trusted Publishing (PyPI)](https://docs.pypi.org/trusted-publishers/)
 - [GitHub OIDC Documentation](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+- [GitLab ID Token Documentation](https://docs.gitlab.com/ci/secrets/id_token_authentication/)
 - [Jenkins OIDC Provider Plugin](https://plugins.jenkins.io/oidc-provider/)
 - [PyJWT Documentation](https://pyjwt.readthedocs.io/)
 - [RFC6750 - OAuth 2.0 Bearer Token Usage](https://datatracker.ietf.org/doc/html/rfc6750)
@@ -634,6 +761,50 @@ PIA_EXPECTED_AUDIENCE=pia.eclipse.org  # optional, has default
   "nbf": 1632492000,
   "exp": 1632492900,
   "iat": 1632492000
+}
+```
+
+### Eclipse GitLab Token
+
+```json
+{
+  "project_id": "16770",
+  "project_path": "eclipsefdn/security/gitlab-id-demo",
+  "namespace_id": "1748",
+  "namespace_path": "eclipsefdn/security",
+  "user_id": "...",
+  "user_login": "...",
+  "user_email": "...",
+  "user_access_level": "developer",
+  "job_project_id": "16770",
+  "job_project_path": "eclipsefdn/security/gitlab-id-demo",
+  "job_namespace_id": "1748",
+  "job_namespace_path": "eclipsefdn/security",
+  "source_project_id": "16770",
+  "source_project_path": "eclipsefdn/security/gitlab-id-demo",
+  "source_namespace_id": "1748",
+  "source_namespace_path": "eclipsefdn/security",
+  "pipeline_id": "175652",
+  "pipeline_source": "push",
+  "job_id": "2339517",
+  "ref": "main",
+  "ref_type": "branch",
+  "ref_path": "refs/heads/main",
+  "ref_protected": "true",
+  "job_source": "push",
+  "runner_id": 2982,
+  "runner_environment": "self-hosted",
+  "sha": "2184a8f0ad3782ea857b61f415e42cb9f9680701",
+  "project_visibility": "public",
+  "ci_config_ref_uri": "gitlab.eclipse.org/eclipsefdn/security/gitlab-id-demo//.gitlab-ci.yml@refs/heads/main",
+  "ci_config_sha": "2184a8f0ad3782ea857b61f415e42cb9f9680701",
+  "jti": "76059480-782f-42c1-a9e3-d29d8383a0a3",
+  "iat": 1793970050,
+  "nbf": 1793970045,
+  "exp": 1793973650,
+  "iss": "https://gitlab.eclipse.org",
+  "sub": "project_path:eclipsefdn/security/gitlab-id-demo:ref_type:branch:ref:main",
+  "aud": "pia.eclipse.org"
 }
 ```
 

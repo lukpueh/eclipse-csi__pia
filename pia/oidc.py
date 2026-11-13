@@ -1,18 +1,107 @@
 """OIDC token validation and signature verification."""
 
+import json
 import logging
+import re
+import time
 from typing import Any
 
 import jwt
 import requests
+import urllib3
+
+from .metrics import OIDC_FETCH_DURATION, TOKEN_VERIFICATION_DURATION
 
 logger = logging.getLogger(__name__)
+
+TIMEOUT = 10
+"""Timeout for the OIDC discovery and JWKS requests to the issuer, in seconds.
+
+Verification runs before the caller is authenticated, and each request holds a
+threadpool worker for as long as the issuer takes to answer. Used as
+connect/read (gap) timeout, and as deadline that is checked between reads of the
+response body (see _fetch_json). Neither bounds the total time of a request."""
+
+MAX_RESPONSE_SIZE = 1024 * 1024
+"""Maximum size of an OIDC discovery or JWKS response, in bytes (decoded).
+
+Real-world responses are a few KB. The cap bounds the memory an issuer can make
+PIA allocate per request."""
 
 
 class TokenVerificationError(Exception):
     """Raised when token verification fails."""
 
 
+_JWKS_PATH_PATTERN = re.compile(r"[A-Za-z0-9._~/-]+")
+
+
+def _is_jwks_uri_allowed(jwks_uri: Any, issuer: str) -> bool:
+    """Check that jwks_uri is a path under the (already allowlisted) issuer URL.
+
+    Deliberately uses string matching instead of a URL parser: urlparse and the
+    libraries that perform the fetch (requests/urllib3, urllib.request) disagree
+    on some inputs (e.g. backslashes). Requiring the trusted issuer string plus
+    "/" as prefix pins scheme, host, port and userinfo.
+    The remaining path is restricted to unreserved characters without "." or ".."
+    segments.
+    """
+    prefix = issuer + "/"
+    if not isinstance(jwks_uri, str) or not jwks_uri.startswith(prefix):
+        return False
+
+    path = jwks_uri[len(prefix) :]
+    if not _JWKS_PATH_PATTERN.fullmatch(path):
+        return False
+
+    return not any(segment in (".", "..") for segment in path.split("/"))
+
+
+def _fetch_json(url: str) -> Any:
+    """Fetch and parse a JSON document from an issuer, with a size cap.
+
+    The requests timeout is a gap timeout per socket read, so an issuer that
+    trickles bytes never trips it. Read the body with read1(), which returns
+    after a single socket read of body data, to check the size cap and a
+    deadline in between.
+
+    NOTE: This does not prevent slow retrieval. Reads within a single
+    requests.get() or read1() call, i.e. of response headers, chunked framing
+    (chunk-size lines, extensions, trailers) and the TLS handshake, are bounded
+    only per read, so an issuer can trickle them to hold a worker indefinitely
+    (see "Future Work" in docs/DESIGN.md).
+
+    Raises TokenVerificationError, requests.RequestException, ValueError or
+    urllib3.exceptions.HTTPError (read1() bypasses requests' wrapping of
+    urllib3 errors raised while reading the body, e.g. a truncated, undecodable
+    or stalled body).
+    """
+    deadline = time.monotonic() + TIMEOUT
+    # Don't follow redirects, which could point anywhere (CWE-918)
+    with requests.get(
+        url, timeout=TIMEOUT, stream=True, allow_redirects=False
+    ) as response:
+        # NOTE: raise_for_status() does not raise on 3xx
+        if response.status_code != 200:
+            raise TokenVerificationError(
+                f"Failed to fetch {url}: HTTP {response.status_code}"
+            )
+        body = bytearray()
+        while chunk := response.raw.read1(8192, decode_content=True):
+            body += chunk
+            if len(body) > MAX_RESPONSE_SIZE:
+                raise TokenVerificationError(
+                    f"Response from {url} exceeds {MAX_RESPONSE_SIZE} bytes"
+                )
+            if time.monotonic() > deadline:
+                raise TokenVerificationError(
+                    f"Response from {url} took longer than {TIMEOUT} seconds"
+                )
+
+    return json.loads(body)
+
+
+@TOKEN_VERIFICATION_DURATION.time()
 def verify_token(
     token: str,
     issuer: str,
@@ -21,39 +110,64 @@ def verify_token(
     """Verify JWT token signature using OIDC discovery and return claims.
     Raises TokenVerificationError, if verification fails
     """
-    logger.info(f"Starting token verification for issuer: {issuer}")
-
     # 1. Request OIDC configuration from issuer
     config_url = f"{issuer}/.well-known/openid-configuration"
 
     try:
-        logger.info(f"Fetching OIDC configuration from {config_url}")
-        response = requests.get(config_url, timeout=10)
-        response.raise_for_status()
-        oidc_config = response.json()
-        logger.info("OIDC configuration fetched successfully")
+        logger.debug(f"Fetching OIDC configuration from {config_url!a}")
+        with OIDC_FETCH_DURATION.labels(phase="discovery").time():
+            oidc_config = _fetch_json(config_url)
+        logger.debug("OIDC configuration fetched successfully")
 
-    except requests.RequestException as e:
+    except (
+        requests.RequestException,
+        urllib3.exceptions.HTTPError,
+        ValueError,
+    ) as e:
         raise TokenVerificationError(
             f"Failed to fetch OIDC configuration from {config_url}: {e}"
         ) from e
 
     # 2. Extract JWKS URI from issuer configuration
+    if not isinstance(oidc_config, dict):
+        raise TokenVerificationError("OIDC configuration is not a JSON object")
+
     jwks_uri = oidc_config.get("jwks_uri")
     if not jwks_uri:
         raise TokenVerificationError("OIDC configuration missing 'jwks_uri'")
 
-    logger.info(f"JWKS URI: {jwks_uri}")
+    if not _is_jwks_uri_allowed(jwks_uri, issuer):
+        raise TokenVerificationError(
+            f"jwks_uri {jwks_uri!r} is not under issuer {issuer!r}"
+        )
+
+    logger.info(f"JWKS URI: {jwks_uri!a}")
 
     try:
         # 3. Requests public keys from issuer
-        logger.info("Fetching signing key from JWKS endpoint")
-        jwks_client = jwt.PyJWKClient(jwks_uri)
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-        logger.info("Signing key retrieved successfully")
+        logger.debug("Fetching signing key from JWKS endpoint")
+        with OIDC_FETCH_DURATION.labels(phase="jwks").time():
+            # Not PyJWKClient, which caps neither size nor total time
+            jwk_set = jwt.PyJWKSet.from_dict(_fetch_json(jwks_uri))
+
+        # Same key selection as PyJWKClient
+        kid = jwt.get_unverified_header(token).get("kid")
+        signing_key = next(
+            (
+                key
+                for key in jwk_set.keys
+                if key.key_id
+                and key.key_id == kid
+                and key.public_key_use in ("sig", None)
+            ),
+            None,
+        )
+        if signing_key is None:
+            raise TokenVerificationError(f"No signing key found for kid {kid!r}")
+        logger.debug("Signing key retrieved successfully")
 
         # 4. Verify token signature and content
-        logger.info(
+        logger.debug(
             f"Verifying token signature and claims "
             f"(expected audience: {expected_audience})"
         )
@@ -71,7 +185,7 @@ def verify_token(
             ),
         )
 
-        logger.info("Token decoded and verified successfully")
+        logger.debug("Token decoded and verified successfully")
         return claims
 
     except Exception as e:

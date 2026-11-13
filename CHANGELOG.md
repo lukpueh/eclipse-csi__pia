@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.10.0] - 2026-11-13
+
+### Added
+* Eclipse GitLab workloads (#127)
+* Threat model by `alpha-omega-security/threat-model`(#121)
+
+### Changed
+* Harden input sanitization for payload and token claims (#125)
+
+### Fixed
+* 500 on input corner cases (#125)
+* Misc CI and dependency updates
+
+## [0.9.0] - 2026-10-20
+
+### Added
+* Per-request ID in log lines and `X-Request-ID` response header (#106)
+
+### Changed
+* Log decisions and outcomes instead of steps, demote per-step lines to
+  DEBUG (#106)
+
+### Fixed
+* 500 on upload validation errors with a non-UTF-8 body, and request body
+  echoed back in validation error responses (#110)
+* Reject non-string issuer in issuer lookup (#109)
+* Misc CI and dependency updates (#98, #101, #103, #104, #105)
+* Escape caller-supplied values in log messages (#106)
+* Run blocking auth and upload I/O off the event loop, so that a slow or
+  unreachable OIDC issuer no longer stalls all other requests (#112)
+* Cap size and total read time of OIDC discovery and JWKS responses (#112)
+* Restrict `jwks_uri` to paths under the issuer URL, and don't follow
+  redirects in OIDC discovery and JWKS fetches (#113)
+
+## [0.8.0] - 2026-09-28
+
+### Added
+* Prometheus metrics endpoint at `/metrics`
+
+## [0.7.0] - 2026-09-25
+
+### Added
+* `release` and `schedule` GitHub events in allowlist (#99)
+
+### Fixed
+* Missing timeout on the DependencyTrack upload request (#97)
+* Misc docs and CI (#90, #89, #94)
+
 ## [0.6.0] - 2026-07-29
 
 ### Added

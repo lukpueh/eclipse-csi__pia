@@ -1,47 +1,65 @@
 """Tests for api module."""
 
 import asyncio
+import base64
+import inspect
+import json
 import logging
+import threading
 from unittest.mock import Mock, patch
 
 import jwt
 import pytest
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
+from fastapi import HTTPException, Request
+from prometheus_client import REGISTRY
+from starlette.requests import ClientDisconnect
 
+from pia import metrics
 from pia.dependencytrack import DependencyTrackError
-from pia.models import GitHubWorkload, Workload
+from pia.models import GitHubWorkload, GitLabWorkload, Workload
 from pia.oidc import TokenVerificationError
 
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
+GITLAB_ISSUER = "https://gitlab.eclipse.org"
 BEARER_TOKEN = "Bearer eyJhbGciOiJSUzI1NiJ9.test.token"
 
 
-@pytest.fixture
-def setup_env(monkeypatch):
-    """Set required env vars for Settings()."""
-    monkeypatch.setenv("PIA_DEPENDENCY_TRACK_API_KEY", "test-secret")
-    # Settings requires a value, but tests override the session dependency,
-    # so the URL is never actually opened.
-    monkeypatch.setenv("PIA_DATABASE_URL", "sqlite:///:memory:")
-
-
-@pytest.fixture
-def client(setup_env, seed_db, session_factory):
-    """FastAPI test client with overridden DB session."""
-    from pia.main import app, get_session
-
-    def override_get_session():
-        session = session_factory()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_session] = override_get_session
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+def _gitlab_claims(**overrides):
+    """Claims of a real Eclipse GitLab ID token, for the seeded GitLab workload."""
+    claims = {
+        "project_id": "16770",
+        "project_path": "eclipse/test/repo",
+        "namespace_id": "1748",
+        "namespace_path": "eclipse/test",
+        "user_id": "21354",
+        "user_login": "octocat",
+        "user_email": "octocat@example.org",
+        "user_access_level": "developer",
+        "job_project_id": "16770",
+        "job_project_path": "eclipse/test/repo",
+        "pipeline_id": "175652",
+        "pipeline_source": "push",
+        "job_id": "2339517",
+        "ref": "main",
+        "ref_type": "branch",
+        "ref_path": "refs/heads/main",
+        "ref_protected": "true",
+        "job_source": "push",
+        "runner_id": 2982,
+        "runner_environment": "self-hosted",
+        "sha": "2184a8f0ad3782ea857b61f415e42cb9f9680701",
+        "project_visibility": "public",
+        "ci_config_ref_uri": (
+            "gitlab.eclipse.org/eclipse/test/repo//.gitlab-ci.yml@refs/heads/main"
+        ),
+        "ci_config_sha": "2184a8f0ad3782ea857b61f415e42cb9f9680701",
+        "jti": "76059480-782f-42c1-a9e3-d29d8383a0a3",
+        "iss": GITLAB_ISSUER,
+        "sub": "project_path:eclipse/test/repo:ref_type:branch:ref:main",
+        "aud": "pia.eclipse.org",
+    }
+    claims.update(overrides)
+    return claims
 
 
 @pytest.fixture
@@ -75,7 +93,7 @@ class TestAuthenticate:
     def _call(self, authorization, session):
         from pia.main import authenticate
 
-        return asyncio.run(authenticate(authorization, session))
+        return authenticate(authorization, session)
 
     def test_invalid_authorization_header(self, seed_db):
         """Error when Authorization header doesn't start with 'Bearer '."""
@@ -145,6 +163,58 @@ class TestAuthenticate:
 
     @patch("pia.main.oidc.verify_token")
     @patch("pia.main.jwt.decode")
+    def test_gitlab_success(self, mock_decode, mock_verify, seed_db, caplog):
+        """A GitLab push pipeline token authenticates the seeded workload."""
+        mock_decode.return_value = {"iss": GITLAB_ISSUER}
+        mock_verify.return_value = _gitlab_claims()
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            result = self._call(BEARER_TOKEN, seed_db)
+        assert isinstance(result, GitLabWorkload)
+        assert result.ef_project_id == "eclipse-test"
+        assert "type=gitlab" in caplog.text
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_gitlab_disallowed_pipeline_source(self, mock_decode, mock_verify, seed_db):
+        """GitLab token with disallowed pipeline_source is rejected."""
+        mock_decode.return_value = {"iss": GITLAB_ISSUER}
+        mock_verify.return_value = _gitlab_claims(pipeline_source="trigger")
+        with pytest.raises(HTTPException) as exc:
+            self._call(BEARER_TOKEN, seed_db)
+        assert exc.value.status_code == 401
+        assert "Token claims rejected" in exc.value.detail
+        assert "trigger" in exc.value.detail
+        assert "schedule" in exc.value.detail
+        assert "github.com/eclipse-csi/pia/issues" in exc.value.detail
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_gitlab_fork_merge_request_logs_claims_without_user(
+        self, mock_decode, mock_verify, seed_db, caplog
+    ):
+        """A fork's MR pipeline token matches no workload; the log names the
+        GitLab identity claims but no user data."""
+        mock_decode.return_value = {"iss": GITLAB_ISSUER}
+        mock_verify.return_value = _gitlab_claims(
+            project_path="attacker/repo",
+            project_id="31337",
+            namespace_path="attacker",
+            namespace_id="4242",
+            pipeline_source="merge_request_event",
+        )
+        with (
+            caplog.at_level(logging.INFO, logger="pia.main"),
+            pytest.raises(HTTPException) as exc,
+        ):
+            self._call(BEARER_TOKEN, seed_db)
+        assert "No matching workload found" in exc.value.detail
+        assert "project_path='attacker/repo'" in caplog.text
+        assert "project_id='31337'" in caplog.text
+        assert "pipeline_source='merge_request_event'" in caplog.text
+        assert "octocat" not in caplog.text
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
     def test_github_disallowed_event_name(self, mock_decode, mock_verify, seed_db):
         """GitHub token with disallowed event_name is rejected."""
         mock_decode.return_value = {"iss": GITHUB_ISSUER}
@@ -158,6 +228,11 @@ class TestAuthenticate:
             self._call(BEARER_TOKEN, seed_db)
         assert exc.value.status_code == 401
         assert "Token claims rejected" in exc.value.detail
+        # The rejected claim and the allowlist are echoed back, so the caller
+        # can fix its workflow or ask for the allowlist to be extended.
+        assert "pull_request_target" in exc.value.detail
+        assert "workflow_dispatch" in exc.value.detail
+        assert "github.com/eclipse-csi/pia/issues" in exc.value.detail
 
     @patch("pia.main.oidc.verify_token")
     @patch("pia.main.jwt.decode")
@@ -173,6 +248,136 @@ class TestAuthenticate:
             self._call(BEARER_TOKEN, seed_db)
         assert exc.value.status_code == 401
         assert "Token claims rejected" in exc.value.detail
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_no_matching_workload_logs_escaped_claims_summary(
+        self, mock_decode, mock_verify, seed_db, caplog
+    ):
+        """Only allowlisted claims are logged, and their values are escaped."""
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/wrong-repo",
+            "repository_owner_id": "42",
+            "ref": "refs/heads/x\n2026-04-27 09:00:00,000 - forged\x1b[2J",
+            "actor": "octocat",
+        }
+        with (
+            caplog.at_level(logging.INFO, logger="pia.main"),
+            pytest.raises(HTTPException),
+        ):
+            self._call(BEARER_TOKEN, seed_db)
+
+        assert "repository='eclipse-test/wrong-repo'" in caplog.text
+        assert "octocat" not in caplog.text
+        for record in caplog.records:
+            msg = record.getMessage()
+            assert "\n" not in msg, f"newline leaked into: {msg!r}"
+            assert "\x1b" not in msg, f"ESC leaked into: {msg!r}"
+        assert any("\\x1b[2J" in r.getMessage() for r in caplog.records)
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_claims_rejected_logs_workload(
+        self, mock_decode, mock_verify, seed_db, caplog
+    ):
+        """The rejection warning identifies the workload on its own line."""
+        workload = seed_db.query(GitHubWorkload).filter_by(repo_name="repo").one()
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/repo",
+            "repository_owner_id": "42",
+            "event_name": "pull_request_target",
+        }
+        with (
+            caplog.at_level(logging.INFO, logger="pia.main"),
+            pytest.raises(HTTPException),
+        ):
+            self._call(BEARER_TOKEN, seed_db)
+
+        [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+        msg = warning.getMessage()
+        assert "Token claims rejected" in msg
+        assert f"project=eclipse-test, id={workload.id}" in msg
+        assert "pull_request_target" in msg
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_success_logs_matched_workload(
+        self, mock_decode, mock_verify, seed_db, caplog
+    ):
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/repo",
+            "repository_owner_id": "42",
+            "event_name": "push",
+        }
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            workload = self._call(BEARER_TOKEN, seed_db)
+        assert (
+            f"Matched workload (project=eclipse-test, type={workload.type}, "
+            f"id={workload.id})" in caplog.text
+        )
+
+
+def _unsigned_token(claims):
+    """Build an unsigned JWT by hand; PyJWT's encoder rejects a non-string iss."""
+
+    def b64(obj):
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{b64({'alg': 'none', 'typ': 'JWT'})}.{b64(claims)}."
+
+
+class TestNonStringIssuer:
+    """Tokens with a non-string `iss` claim are rejected at the endpoint."""
+
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            1234,
+            True,
+            ["https://ci.eclipse.org/eclipse-other/oidc"],
+            {"a": 1},
+        ],
+    )
+    def test_issuer_not_allowed(self, client, valid_request_data, issuer):
+        response = client.post(
+            "/v1/upload/sbom",
+            json=valid_request_data,
+            headers={"Authorization": f"Bearer {_unsigned_token({'iss': issuer})}"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Issuer not allowed"
+
+
+class TestMalformedIssuer:
+    """Tokens with a malformed string `iss` claim are rejected at the endpoint."""
+
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            # Text the database driver cannot encode
+            "https://ci.eclipse.org/\x00",
+            "https://ci.eclipse.org/eclipse-other\x00/oidc",
+            "https://ci.eclipse.org/\ud800",
+            "https://ci.eclipse.org/eclipse-other\ud800/oidc",
+            # Control characters
+            "https://ci.eclipse.org/eclipse-other/oidc\n",
+        ],
+    )
+    def test_issuer_not_allowed(self, client, valid_request_data, issuer):
+        response = client.post(
+            "/v1/upload/sbom",
+            json=valid_request_data,
+            headers={"Authorization": f"Bearer {_unsigned_token({'iss': issuer})}"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Issuer not allowed"
 
 
 class TestUploadSBOMEndpoint:
@@ -209,11 +414,9 @@ class TestUploadSBOMEndpoint:
         authenticate_as_workload,
         caplog,
     ):
-        """A 2xx DT response without a 'token' field propagates an error.
+        """A 2xx DT response without a 'token' field yields a 500.
 
-        TestClient re-raises server exceptions; in production FastAPI's ASGI
-        server converts them to 500. Either way the publisher does not get
-        a misleading 200.
+        The publisher must not get a misleading 200.
         """
         mock_dt_response = Mock()
         mock_dt_response.ok = True
@@ -222,8 +425,8 @@ class TestUploadSBOMEndpoint:
         mock_dt_response.text = '{"unexpected": "shape"}'
         mock_upload.return_value = mock_dt_response
 
-        with pytest.raises(KeyError):
-            client.post("/v1/upload/sbom", json=valid_request_data)
+        response = client.post("/v1/upload/sbom", json=valid_request_data)
+        assert response.status_code == 500
 
         assert "unparseable success response" in caplog.text
         assert "unexpected" in caplog.text
@@ -248,11 +451,110 @@ class TestUploadSBOMEndpoint:
         assert response.status_code == 400
         assert response.content == b'{"detail":"invalid bom"}'
 
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_upload_dt_non_ok_logged_escaped(
+        self,
+        mock_upload,
+        client,
+        valid_request_data,
+        authenticate_as_workload,
+        caplog,
+    ):
+        """Non-2xx DT responses are logged, with the body escaped."""
+        mock_dt_response = Mock()
+        mock_dt_response.ok = False
+        mock_dt_response.status_code = 400
+        mock_dt_response.content = b'{"detail":"bad\n2026 - forged"}'
+        mock_upload.return_value = mock_dt_response
+
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            client.post("/v1/upload/sbom", json=valid_request_data)
+
+        [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+        msg = warning.getMessage()
+        assert "DependencyTrack rejected upload (status=400" in msg
+        assert "\n" not in msg
+        assert "bad\\n2026" in msg
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_upload_success_logged_escaped(
+        self,
+        mock_upload,
+        client,
+        valid_request_data,
+        authenticate_as_workload,
+        caplog,
+    ):
+        """Successful uploads are logged, with the caller's version escaped."""
+        valid_request_data["product_version"] = "1.0-ünïcödé"
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"token": "dt-token-abc"}
+        mock_upload.return_value = mock_dt_response
+
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            response = client.post("/v1/upload/sbom", json=valid_request_data)
+        assert response.status_code == 200
+
+        assert "SBOM uploaded" in caplog.text
+        assert "dt_token='dt-token-abc'" in caplog.text
+        assert "version='1.0-\\xfcn\\xefc\\xf6d\\xe9'" in caplog.text
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_bom_relayed_unvalidated(
+        self, mock_upload, client, authenticate_as_workload
+    ):
+        """PIA does not validate `bom` content; DependencyTrack does."""
+        mock_upload.return_value = Mock(
+            ok=False, status_code=400, content=b'{"detail":"bad bom"}'
+        )
+        # Raw JSON escapes: NUL, lone surrogate, not base64
+        body = (
+            r'{"product_name": "test-product", "product_version": "1.0.0", '
+            r'"bom": "x\u0000\ud800!"}'
+        )
+        response = client.post(
+            "/v1/upload/sbom",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 400
+        dt_payload = mock_upload.call_args.args[2]
+        assert dt_payload.bom == "x\x00\ud800!"
+
     def test_upload_invalid_json(self, client, authenticate_as_workload):
         """Error with invalid JSON."""
+        response = client.post(
+            "/v1/upload/sbom",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["type"] == "json_invalid"
+
+    def test_upload_no_content_type(self, client, authenticate_as_workload):
+        """Error with a body sent without a JSON Content-Type."""
         response = client.post("/v1/upload/sbom", content=b"not-json")
         assert response.status_code == 422
-        assert b"JSON" in response.content or b"json" in response.content
+        assert response.json()["detail"][0]["type"] == "model_attributes_type"
+
+    def test_upload_non_utf8_body(self, client, authenticate_as_workload):
+        """Non-UTF-8 body without a JSON Content-Type is a 422, not a 500.
+
+        https://github.com/fastapi/fastapi/discussions/11923
+        """
+        response = client.post("/v1/upload/sbom", content=b"\xcf\xcf\xcf")
+        assert response.status_code == 422
+
+    def test_upload_validation_error_omits_input(
+        self, client, authenticate_as_workload
+    ):
+        """Validation errors don't echo the request body back."""
+        response = client.post("/v1/upload/sbom", content=b"a" * 1_000_000)
+        assert response.status_code == 422
+        assert len(response.content) < 1_000
+        assert all("input" not in e for e in response.json()["detail"])
 
     def test_upload_missing_field(
         self, client, valid_request_data, authenticate_as_workload
@@ -327,7 +629,7 @@ class TestNewlineEscaping:
             caplog.at_level(logging.INFO, logger="pia.main"),
             pytest.raises(HTTPException),
         ):
-            asyncio.run(authenticate(BEARER_TOKEN, seed_db))
+            authenticate(BEARER_TOKEN, seed_db)
 
         for record in caplog.records:
             msg = record.getMessage()
@@ -335,3 +637,587 @@ class TestNewlineEscaping:
         assert any("\\n" in r.getMessage() for r in caplog.records), (
             "expected escaped newline somewhere in captured logs"
         )
+
+    @pytest.mark.parametrize("field", ["product_name", "product_version"])
+    def test_control_chars_in_payload_rejected(
+        self, client, valid_request_data, authenticate_as_workload, caplog, field
+    ):
+        valid_request_data[field] = (
+            "x\n2026-04-27 09:00:00,000 - pia.main - INFO - forged\x1b[2J"
+        )
+
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            response = client.post("/v1/upload/sbom", json=valid_request_data)
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", field]
+        assert "forged" not in response.text
+
+        for record in caplog.records:
+            msg = record.getMessage()
+            assert "\n" not in msg, f"newline leaked into: {msg!r}"
+            assert "\x1b" not in msg, f"ESC leaked into: {msg!r}"
+
+    @pytest.mark.parametrize(
+        "field, raw",
+        [
+            # Escapes the database driver cannot encode (NUL, lone surrogate);
+            # sent raw so they reach the server as JSON escapes.
+            ("product_name", r'"test-product\u0000"'),
+            ("product_name", r'"test-product\ud800"'),
+            ("product_version", r'"1.0\u0000"'),
+            ("product_version", r'"1.0\ud800"'),
+            # Empty
+            ("product_name", '""'),
+            ("product_version", '""'),
+            # No type coercion
+            ("product_name", "1"),
+            ("product_version", "1.0"),
+            ("bom", "null"),
+            ("is_latest", "1"),
+            ("is_latest", '"true"'),
+        ],
+    )
+    def test_malformed_payload_field_rejected(
+        self, client, valid_request_data, authenticate_as_workload, field, raw
+    ):
+        """Malformed payload fields are a 422 before any lookup, not a 500."""
+        body = json.dumps(dict(valid_request_data, **{field: None}))
+        body = body.replace(f'"{field}": null', f'"{field}": {raw}')
+        response = client.post(
+            "/v1/upload/sbom",
+            content=body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", field]
+
+
+@pytest.mark.usefixtures("setup_env")
+class TestRequestId:
+    """Tests for the request ID middleware and log record stamping."""
+
+    def test_response_carries_fresh_request_id(self, client):
+        first = client.get("/livez").headers["X-Request-ID"]
+        second = client.get("/livez").headers["X-Request-ID"]
+        assert len(first) == 16
+        int(first, 16)
+        assert first != second
+
+    def test_inbound_request_id_is_ignored(self, client):
+        response = client.get("/livez", headers={"X-Request-ID": "spoofed"})
+        assert response.headers["X-Request-ID"] != "spoofed"
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_log_records_carry_request_id(
+        self,
+        mock_upload,
+        client,
+        valid_request_data,
+        authenticate_as_workload,
+        caplog,
+    ):
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"token": "dt-token-abc"}
+        mock_upload.return_value = mock_dt_response
+
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            response = client.post("/v1/upload/sbom", json=valid_request_data)
+
+        records = [r for r in caplog.records if r.name == "pia.main"]
+        assert records
+        assert {r.request_id for r in records} == {response.headers["X-Request-ID"]}
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_unhandled_exception_carries_request_id(
+        self,
+        mock_upload,
+        client,
+        valid_request_data,
+        authenticate_as_workload,
+        caplog,
+    ):
+        """The 500 and the logged traceback of an unhandled exception share
+        the request ID, so they can be correlated."""
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"unexpected": "shape"}
+        mock_dt_response.text = '{"unexpected": "shape"}'
+        mock_upload.return_value = mock_dt_response
+
+        response = client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert response.status_code == 500
+        rid = response.headers["X-Request-ID"]
+        tracebacks = [r for r in caplog.records if r.exc_info]
+        assert tracebacks
+        assert {r.request_id for r in tracebacks} == {rid}
+
+    def test_log_records_outside_request_get_placeholder(self, caplog):
+        from pia.main import logger
+
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            logger.info("outside a request")
+        assert caplog.records[-1].request_id == "-"
+
+
+@pytest.mark.usefixtures("setup_env")
+class TestBlockingIO:
+    """Blocking I/O must not run on the event loop."""
+
+    def test_endpoints_are_sync(self):
+        """Plain `def` makes FastAPI run them in its threadpool."""
+        from pia.main import authenticate, upload_sbom
+
+        assert not inspect.iscoroutinefunction(authenticate)
+        assert not inspect.iscoroutinefunction(upload_sbom)
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_slow_issuer_does_not_stall_other_requests(
+        self, mock_decode, mock_verify, client, valid_request_data, caplog
+    ):
+        """/livez answers while an upload hangs in OIDC verification, and the
+        upload's log records, emitted in a worker thread, keep its request ID."""
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_verify(*args):
+            entered.set()
+            release.wait(timeout=10)
+            raise TokenVerificationError("issuer timed out")
+
+        mock_verify.side_effect = slow_verify
+        responses = {}
+
+        def upload():
+            responses["upload"] = client.post(
+                "/v1/upload/sbom",
+                json=valid_request_data,
+                headers={"Authorization": BEARER_TOKEN},
+            )
+
+        def livez():
+            responses["livez"] = client.get("/livez")
+
+        uploader = threading.Thread(target=upload)
+        prober = threading.Thread(target=livez)
+        with caplog.at_level(logging.INFO, logger="pia.main"):
+            uploader.start()
+            try:
+                assert entered.wait(timeout=5)
+                prober.start()
+                # Joined with a timeout, so a regression fails instead of
+                # deadlocking: the stalled loop would only free up on release.
+                prober.join(timeout=2)
+                assert not prober.is_alive(), "/livez stalled behind the upload"
+                assert responses["livez"].status_code == 200
+            finally:
+                release.set()
+                uploader.join(timeout=10)
+                prober.join(timeout=10)
+
+        assert responses["upload"].status_code == 401
+        rid = responses["upload"].headers["X-Request-ID"]
+        auth_records = [
+            r for r in caplog.records if r.getMessage().startswith("Issuer ")
+        ]
+        assert auth_records
+        assert {r.request_id for r in auth_records} == {rid}
+
+
+@pytest.mark.usefixtures("setup_env", "authenticate_as_workload")
+class TestHTTPMetrics:
+    """Tests for the request-counting middleware."""
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_success_labeled_with_route_template(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"token": "dt-token-abc"}
+        mock_upload.return_value = mock_dt_response
+
+        labels = dict(method="POST", path="/v1/upload/sbom", status="200")
+        before = metric_value("pia_http_requests_total", **labels)
+        before_duration = metric_value(
+            "pia_http_request_duration_seconds_count",
+            method="POST",
+            path="/v1/upload/sbom",
+        )
+
+        client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert metric_value("pia_http_requests_total", **labels) == before + 1
+        assert (
+            metric_value(
+                "pia_http_request_duration_seconds_count",
+                method="POST",
+                path="/v1/upload/sbom",
+            )
+            == before_duration + 1
+        )
+
+    def test_unmatched_paths_collapse_to_sentinel(self, client, metric_value):
+        """Unrouted paths must not mint a label value each (cardinality)."""
+        labels = dict(method="GET", path="<unmatched>", status="404")
+        before = metric_value("pia_http_requests_total", **labels)
+
+        client.get("/v1/nope/aaa")
+        client.get("/v1/nope/bbb")
+
+        assert metric_value("pia_http_requests_total", **labels) == before + 2
+        for raw in ("/v1/nope/aaa", "/v1/nope/bbb"):
+            assert (
+                metric_value(
+                    "pia_http_requests_total", method="GET", path=raw, status="404"
+                )
+                == 0.0
+            )
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_relayed_dt_status_is_counted_verbatim(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        """The raw DT relay Response must be counted as DT's status, not 200."""
+        mock_dt_response = Mock()
+        mock_dt_response.ok = False
+        mock_dt_response.status_code = 400
+        mock_dt_response.content = b'{"detail":"invalid bom"}'
+        mock_upload.return_value = mock_dt_response
+
+        labels = dict(method="POST", path="/v1/upload/sbom")
+        before_400 = metric_value("pia_http_requests_total", **labels, status="400")
+        before_200 = metric_value("pia_http_requests_total", **labels, status="200")
+
+        client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert metric_value("pia_http_requests_total", **labels, status="400") == (
+            before_400 + 1
+        )
+        assert metric_value("pia_http_requests_total", **labels, status="200") == (
+            before_200
+        )
+
+    def test_nonstandard_methods_collapse_to_sentinel(self, client, metric_value):
+        """Invented methods must not mint a label value each (cardinality)."""
+        labels = dict(method=metrics.OTHER_METHOD, path="/livez", status="405")
+        before = metric_value("pia_http_requests_total", **labels)
+
+        client.request("XYZZY", "/livez")
+        client.request("PWNME", "/livez")
+
+        assert metric_value("pia_http_requests_total", **labels) == before + 2
+        recorded = {
+            sample.labels["method"]
+            for metric in REGISTRY.collect()
+            for sample in metric.samples
+            if "method" in sample.labels
+        }
+        assert recorded <= metrics.HTTP_METHODS | {metrics.OTHER_METHOD}
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_client_disconnect_is_not_counted_as_500(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        """A hangup must stay out of the 5xx rate an SLO alert watches."""
+        mock_upload.side_effect = ClientDisconnect
+        labels = dict(method="POST", path="/v1/upload/sbom")
+        before_500 = metric_value("pia_http_requests_total", **labels, status="500")
+        before = metric_value(
+            "pia_http_requests_total", **labels, status=metrics.DISCONNECTED_STATUS
+        )
+
+        with pytest.raises(ClientDisconnect):
+            client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert metric_value(
+            "pia_http_requests_total", **labels, status=metrics.DISCONNECTED_STATUS
+        ) == (before + 1)
+        assert metric_value("pia_http_requests_total", **labels, status="500") == (
+            before_500
+        )
+
+    def test_cancellation_is_not_counted_as_500(self, metric_value):
+        """Cancellation (e.g. on shutdown) is not a server fault either.
+
+        Driven directly: BaseHTTPMiddleware turns a CancelledError raised
+        *inside* the app into "No response returned", so the only way this
+        middleware sees one is from its own await being cancelled.
+        """
+        labels = dict(method="GET", path="<unmatched>")
+        before_500 = metric_value("pia_http_requests_total", **labels, status="500")
+        before = metric_value(
+            "pia_http_requests_total", **labels, status=metrics.DISCONNECTED_STATUS
+        )
+
+        # Imported here: pia.main reads settings at import time, so it must
+        # not be imported before the setup_env fixture has run.
+        from pia.main import record_http_metrics
+
+        async def cancel(_request):
+            raise asyncio.CancelledError
+
+        request = Request({"type": "http", "method": "GET", "headers": []})
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(record_http_metrics(request, cancel))
+
+        assert metric_value(
+            "pia_http_requests_total", **labels, status=metrics.DISCONNECTED_STATUS
+        ) == (before + 1)
+        assert metric_value("pia_http_requests_total", **labels, status="500") == (
+            before_500
+        )
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_unhandled_exception_counted_as_500(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        """An exception propagating through call_next must still be counted."""
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"unexpected": "shape"}
+        mock_dt_response.text = '{"unexpected": "shape"}'
+        mock_upload.return_value = mock_dt_response
+
+        labels = dict(method="POST", path="/v1/upload/sbom", status="500")
+        before = metric_value("pia_http_requests_total", **labels)
+
+        response = client.post("/v1/upload/sbom", json=valid_request_data)
+        assert response.status_code == 500
+
+        assert metric_value("pia_http_requests_total", **labels) == before + 1
+
+
+@pytest.mark.usefixtures("setup_env", "authenticate_as_workload")
+class TestUploadMetrics:
+    """Tests for SBOM upload outcome and rejection metrics."""
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_success_outcome_and_timing(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        mock_dt_response = Mock()
+        mock_dt_response.ok = True
+        mock_dt_response.status_code = 200
+        mock_dt_response.json.return_value = {"token": "dt-token-abc"}
+        mock_upload.return_value = mock_dt_response
+
+        labels = dict(
+            ef_project_id="eclipse-test",
+            product_name="test-product",
+            outcome="success",
+        )
+        before = metric_value("pia_sbom_uploads_total", **labels)
+        before_dt = metric_value("pia_dependencytrack_upload_duration_seconds_count")
+        before_size = metric_value("pia_sbom_size_bytes_count")
+
+        client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert metric_value("pia_sbom_uploads_total", **labels) == before + 1
+        assert (
+            metric_value("pia_dependencytrack_upload_duration_seconds_count")
+            == before_dt + 1
+        )
+        assert metric_value("pia_sbom_size_bytes_count") == before_size + 1
+
+    @patch("pia.main.dependencytrack.upload_sbom")
+    def test_dt_request_error_is_timed_and_counted(
+        self, mock_upload, client, valid_request_data, metric_value
+    ):
+        """A failed upload is still timed."""
+        mock_upload.side_effect = DependencyTrackError()
+
+        labels = dict(
+            ef_project_id="eclipse-test",
+            product_name="test-product",
+            outcome="dt_request_error",
+        )
+        before = metric_value("pia_sbom_uploads_total", **labels)
+        before_dt = metric_value("pia_dependencytrack_upload_duration_seconds_count")
+
+        client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert metric_value("pia_sbom_uploads_total", **labels) == before + 1
+        assert (
+            metric_value("pia_dependencytrack_upload_duration_seconds_count")
+            == before_dt + 1
+        )
+
+    def test_unknown_product_never_becomes_a_label(
+        self, client, valid_request_data, metric_value
+    ):
+        """A caller-supplied product name must not reach a label (cardinality)."""
+        valid_request_data["product_name"] = "unknown-product"
+
+        before_reject = metric_value(
+            "pia_upload_rejections_total", reason="no_dt_project"
+        )
+        before_outcome = metric_value(
+            "pia_sbom_uploads_total",
+            ef_project_id="eclipse-test",
+            product_name="_unregistered",
+            outcome="no_dt_project",
+        )
+
+        client.post("/v1/upload/sbom", json=valid_request_data)
+
+        assert (
+            metric_value("pia_upload_rejections_total", reason="no_dt_project")
+            == before_reject + 1
+        )
+        assert (
+            metric_value(
+                "pia_sbom_uploads_total",
+                ef_project_id="eclipse-test",
+                product_name="_unregistered",
+                outcome="no_dt_project",
+            )
+            == before_outcome + 1
+        )
+        assert (
+            metric_value(
+                "pia_sbom_uploads_total",
+                ef_project_id="eclipse-test",
+                product_name="unknown-product",
+                outcome="no_dt_project",
+            )
+            == 0.0
+        )
+
+
+@pytest.mark.usefixtures("setup_env")
+class TestRejectionReasons:
+    """Every _401 branch must count its own bounded reason."""
+
+    def _reject(self, seed_db, authorization=BEARER_TOKEN):
+        from pia.main import authenticate
+
+        with pytest.raises(HTTPException):
+            authenticate(authorization, seed_db)
+
+    def test_invalid_header(self, seed_db, metric_value):
+        before = metric_value("pia_upload_rejections_total", reason="invalid_header")
+        self._reject(seed_db, "Basic invalid")
+        assert (
+            metric_value("pia_upload_rejections_total", reason="invalid_header")
+            == before + 1
+        )
+
+    @patch("pia.main.jwt.decode")
+    def test_invalid_token(self, mock_decode, seed_db, metric_value):
+        mock_decode.side_effect = jwt.PyJWTError()
+        before = metric_value("pia_upload_rejections_total", reason="invalid_token")
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="invalid_token")
+            == before + 1
+        )
+
+    @patch("pia.main.jwt.decode")
+    def test_issuer_not_allowed(self, mock_decode, seed_db, metric_value):
+        mock_decode.return_value = {"iss": "https://wrong-issuer.com"}
+        before = metric_value(
+            "pia_upload_rejections_total", reason="issuer_not_allowed"
+        )
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="issuer_not_allowed")
+            == before + 1
+        )
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_verification_failed(self, mock_decode, mock_verify, seed_db, metric_value):
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.side_effect = TokenVerificationError()
+        before = metric_value(
+            "pia_upload_rejections_total", reason="verification_failed"
+        )
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="verification_failed")
+            == before + 1
+        )
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_no_workload(self, mock_decode, mock_verify, seed_db, metric_value):
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/wrong-repo",
+            "repository_owner_id": "42",
+        }
+        before = metric_value("pia_upload_rejections_total", reason="no_workload")
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="no_workload")
+            == before + 1
+        )
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_claims_rejected(self, mock_decode, mock_verify, seed_db, metric_value):
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/repo",
+            "repository_owner_id": "42",
+            "event_name": "pull_request_target",
+        }
+        before = metric_value("pia_upload_rejections_total", reason="claims_rejected")
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="claims_rejected")
+            == before + 1
+        )
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_gitlab_claims_rejected(
+        self, mock_decode, mock_verify, seed_db, metric_value
+    ):
+        mock_decode.return_value = {"iss": GITLAB_ISSUER}
+        mock_verify.return_value = _gitlab_claims(
+            pipeline_source="external_pull_request_event"
+        )
+        before = metric_value("pia_upload_rejections_total", reason="claims_rejected")
+        self._reject(seed_db)
+        assert (
+            metric_value("pia_upload_rejections_total", reason="claims_rejected")
+            == before + 1
+        )
+
+    @patch("pia.main.oidc.verify_token")
+    @patch("pia.main.jwt.decode")
+    def test_successful_auth_records_no_rejection(
+        self, mock_decode, mock_verify, seed_db, metric_value
+    ):
+        """Successful auth must not touch the rejection counter."""
+        from pia.main import authenticate
+        from pia.metrics import RejectionReason
+
+        mock_decode.return_value = {"iss": GITHUB_ISSUER}
+        mock_verify.return_value = {
+            "iss": GITHUB_ISSUER,
+            "repository": "eclipse-test/repo",
+            "repository_owner_id": "42",
+            "event_name": "push",
+        }
+        reasons = RejectionReason.__args__
+        before = sum(
+            metric_value("pia_upload_rejections_total", reason=r) for r in reasons
+        )
+
+        authenticate(BEARER_TOKEN, seed_db)
+
+        after = sum(
+            metric_value("pia_upload_rejections_total", reason=r) for r in reasons
+        )
+        assert after == before

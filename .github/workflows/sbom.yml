@@ -1,13 +1,22 @@
 name: Generate SBOM
 
 on:
-  registry_package:
-    types: [published]
+  # Called from publish.yml once the image is pushed. A registry_package
+  # trigger cannot be used here: publish.yml pushes with GITHUB_TOKEN, and
+  # events triggered by GITHUB_TOKEN do not start new workflow runs.
+  workflow_call:
+    inputs:
+      version:
+        description: "Docker image tag (e.g. 0.2.1)"
+        required: true
+        type: string
+  # Backfill an SBOM for an image that is already published.
   workflow_dispatch:
     inputs:
       version:
         description: "Docker image tag (e.g. 0.2.1)"
         required: true
+        type: string
 
 permissions:
   id-token: write
@@ -16,14 +25,14 @@ env:
   REGISTRY: ghcr.io
   OWNER: eclipse-csi
   NAME: pia
-  VERSION: "${{ inputs.version || github.event.registry_package.package_version.container_metadata.tag.name }}"
+  VERSION: "${{ inputs.version }}"
 
 jobs:
   sbom-docker:
     runs-on: ubuntu-latest
     steps:
     - name: Generate SBOM
-      uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       with:
         image: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ env.NAME }}:${{ env.VERSION }}
         output-file: sbom.json
